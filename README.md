@@ -30,28 +30,18 @@ This repository contains the initial implementation focusing on data integration
 
 ### ETL Pipeline Components
 
-1. **Extract**: Read data from CSV and JSON sources
-2. **Transform**: 
-   - Data cleaning and standardization
-   - User mapping across datasets
-   - Metric calculations and aggregations
-3. **Load**: Store in MySQL with optimized schema
+1. **Extract**: read the raw data
+2. **Transform** the data into the Snowflake schema
+   - Unifying users
+   - Parsing text blobs into keys
+   - Creating fact and dimension dataframes
+3. **Load** the data into the data warehouse.
 
 ### Database Schema
 
-- **user_profiles**: Unified user information from all sources
-- **workout_sessions**: Individual workout records and metrics
-- **health_metrics**: Time-series health data (sleep, heart rate, etc.)
-- **nutrition_data**: Master food database
-- **nutrition_logs**: User food consumption tracking
-- **user_recommendations**: Personalized recommendations (future use)
+This project builds an **Online Analytical Processing (OLAP)** data warehouse using a **Snowflake Schema**.
 
-## Installation & Setup
-
-### Prerequisites
-
-- Python 3.8+
-- MySQL 8.0+
-- Required Python packages (see requirements.txt)
-
-### Installation Steps
+This model is optimized for high-speed, complex `GROUP BY` and `JOIN` queries essential for analytics and machine learning.
+- **Fact Tables (Green)**: Store the "measures" or numbers (e.g., Weight, CaloriesBurned).
+- **Dimension Tables (Blue)**: Store the "context" or categories (e.g., UserName, ExerciseName).
+- **Bridge Tables (Yellow)**: Connect dimensions with many-to-many relationships (e.g., a User can have many Health Conditions).
