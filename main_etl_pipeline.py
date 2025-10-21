@@ -1,20 +1,13 @@
-"""
-Smart Fitness & Nutrition Recommendation Pipeline - Initial ETL Script
-Author: Team Project
-Date: October 2024
-Purpose: Part 1 Deliverable - Data extraction, cleaning, and integration
-Database: MySQL
-"""
-
 import pandas as pd
 import numpy as np
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-import mysql.connector
 from sqlalchemy import create_engine, text
 import warnings
+import re
+
 warnings.filterwarnings('ignore')
 
 # Configure logging
@@ -22,7 +15,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('etl_pipeline.log'),
+        logging.FileHandler('etl_pipeline.log', mode='w'), # Overwrite log on new run
         logging.StreamHandler()
     ]
 )
@@ -30,30 +23,40 @@ logger = logging.getLogger(__name__)
 
 class FitnessNutritionETL:
     """
-    Main ETL class for Smart Fitness & Nutrition Recommendation Pipeline
-    Handles extraction, transformation, and loading of multiple data sources
+    ETL class for fitness & nutrition pipeline 
+    
+    This pipeline extracts data from multiple sources, transforms it, 
+    and loads it into a MySQL data warehouse for analytical querying.
     """
     
     def __init__(self, config):
         self.config = config
         self.data_sources = {}
-        self.processed_data = {}
+        self.staging_data = {}
+        self.warehouse_data = {} # This will hold the final Dim/Fact DataFrames
         self.engine = None
+        self.user_mapping = {}
         
     def setup_database_connection(self):
-        """Setup MySQL database connection"""
+        """Setup MySQL database connection using SQLAlchemy."""
         try:
-            connection_string = f"mysql+pymysql://{self.config['db_user']}:{self.config['db_password']}@{self.config['db_host']}:{self.config['db_port']}/{self.config['db_name']}?charset=utf8mb4"
+            # Note: The database (e.g., 'fitness_nutrition_dw') must exist.
+            # The schema will be created inside it.
+            db_cfg = self.config['DATABASE_CONFIG']
+            connection_string = (
+                f"mysql+pymysql://{db_cfg['username']}:{db_cfg['password']}@"
+                f"{db_cfg['host']}:{db_cfg['port']}/{db_cfg['database']}?charset=utf8mb4"
+            )
             self.engine = create_engine(connection_string)
             logger.info("MySQL database connection established successfully")
         except Exception as e:
             logger.error(f"Failed to connect to MySQL database: {e}")
             raise
-    
+
+    # EXTRACT 
     def extract_fitbit_data(self):
-        """Extract and process Fitbit datasets"""
+        """Extract and process Fitbit datasets."""
         logger.info("Starting Fitbit data extraction...")
-        
         fitbit_files = {
             'daily_activity': 'dailyActivity_merged.csv',
             'heartrate': 'heartrate_seconds_merged.csv',
@@ -61,729 +64,611 @@ class FitnessNutritionETL:
             'weight_log': 'weightLogInfo_merged.csv',
             'sleep_minutes': 'minuteSleep_merged.csv'
         }
-        
         fitbit_data = {}
+        base_path = Path(self.config['DATA_PATHS']['fitbit_path'])
         
         for key, filename in fitbit_files.items():
             try:
-                filepath = Path(self.config['data_path']) / 'fitbit' / filename
+                filepath = base_path / filename
                 if not filepath.exists():
                     logger.warning(f"File not found: {filepath}, skipping...")
                     continue
-                    
                 df = pd.read_csv(filepath)
-                
-                # Data cleaning based on requirements
-                if key == 'daily_activity':
-                    # Remove weather_conditions and date if they exist
-                    columns_to_remove = ['weather_conditions', 'date']
-                    df = df.drop(columns=[col for col in columns_to_remove if col in df.columns])
-                    
-                elif key == 'heartrate':
-                    # Convert to datetime and calculate daily averages
-                    df['Time'] = pd.to_datetime(df['Time'])
-                    df['Date'] = df['Time'].dt.date
-                    df = df.groupby(['Id', 'Date'])['Value'].mean().reset_index()
-                    df.rename(columns={'Value': 'avg_heartrate'}, inplace=True)
-                    
-                elif key == 'hourly_calories':
-                    # Calculate daily calorie totals
-                    df['ActivityHour'] = pd.to_datetime(df['ActivityHour'])
-                    df['Date'] = df['ActivityHour'].dt.date
-                    df = df.groupby(['Id', 'Date'])['Calories'].sum().reset_index()
-                    df.rename(columns={'Calories': 'daily_calories'}, inplace=True)
-                    
-                elif key == 'sleep_minutes':
-                    # Calculate hours of sleep per day
-                    df['date'] = pd.to_datetime(df['date'])
-                    df = df.groupby(['Id', 'date'])['value'].sum().reset_index()
-                    df['hours_sleep'] = df['value'] / 60  # Convert minutes to hours
-                    df = df[['Id', 'date', 'hours_sleep']]
-                
-                # Remove rows with all NaN values
-                df = df.dropna(how='all')
-                
                 fitbit_data[key] = df
-                logger.info(f"Processed {key}: {len(df)} records")
-                
+                logger.info(f"Extracted {key}: {len(df)} records")
             except Exception as e:
-                logger.error(f"Error processing {filename}: {e}")
-                continue
+                logger.error(f"Error extracting {filename}: {e}")
         
         self.data_sources['fitbit'] = fitbit_data
-        return fitbit_data
-    
+        logger.info("Fitbit data extraction complete.")
+
     def extract_gym_members_data(self):
-        """Extract and process gym members dataset"""
+        """Extract and process gym members dataset."""
         logger.info("Starting gym members data extraction...")
-        
         try:
-            filepath = Path(self.config['data_path']) / 'gym_members_exercise_dataset.csv'
+            filepath = self.config['DATA_PATHS']['gym_members_file']
             if not filepath.exists():
                 logger.warning(f"File not found: {filepath}, skipping...")
-                return None
-                
+                return
             df = pd.read_csv(filepath)
-            
-            # Clean and standardize column names
-            df.columns = df.columns.str.lower().str.replace(' ', '_').str.replace('(', '').str.replace(')', '').str.replace('/', '_')
-            
-            # Handle missing values
-            numeric_columns = df.select_dtypes(include=[np.number]).columns
-            for col in numeric_columns:
-                df[col].fillna(df[col].mean(), inplace=True)
-            
-            # Standardize categorical data
-            if 'gender' in df.columns:
-                df['gender'] = df['gender'].str.lower()
-            
-            if 'workout_type' in df.columns:
-                df['workout_type'] = df['workout_type'].str.lower()
-            
             self.data_sources['gym_members'] = df
-            logger.info(f"Processed gym members data: {len(df)} records")
-            return df
-            
+            logger.info(f"Extracted gym members data: {len(df)} records")
         except Exception as e:
             logger.error(f"Error processing gym members data: {e}")
-            return None
-    
+
     def extract_mendeley_health_data(self):
-        """Extract and process Mendeley health dataset"""
+        """Extract and process Mendeley health dataset."""
         logger.info("Starting Mendeley health data extraction...")
-        
         try:
-            filepath = Path(self.config['data_path']) / 'mendeley_health_fitness.csv'
+            filepath = self.config['DATA_PATHS']['mendeley_file']
             if not filepath.exists():
                 logger.warning(f"File not found: {filepath}, skipping...")
-                return None
-                
-            df = pd.read_csv(filepath)
-            
-            # Clean column names
-            df.columns = df.columns.str.lower().str.replace(' ', '_').str.replace('/', '_')
-            
-            # Standardize fitness goals
-            if 'fitness_goals' in df.columns:
-                df['fitness_goals'] = df['fitness_goals'].str.lower()
-                
-            # Standardize workout types
-            if 'workout' in df.columns:
-                df['workout'] = df['workout'].str.lower()
-            
-            # Handle missing values
-            essential_cols = [col for col in ['age', 'weight', 'height'] if col in df.columns]
-            if essential_cols:
-                df = df.dropna(subset=essential_cols)  # Keep records with essential info
-            
+                return
+            # Note: Your original code said .xlsx but file path was .csv
+            # Assuming CSV based on your config file name.
+            df = pd.read_csv(filepath) 
             self.data_sources['mendeley_health'] = df
-            logger.info(f"Processed Mendeley health data: {len(df)} records")
-            return df
-            
+            logger.info(f"Extracted Mendeley health data: {len(df)} records")
         except Exception as e:
             logger.error(f"Error processing Mendeley health data: {e}")
-            return None
-    
+
     def extract_nutrition_data(self):
-        """Extract and process nutrition JSON dataset"""
+        """Extract and process nutrition JSON dataset."""
         logger.info("Starting nutrition data extraction...")
-        
         try:
-            filepath = Path(self.config['data_path']) / 'nutrition_dataset.json'
+            filepath = self.config['DATA_PATHS']['nutrition_file']
             if not filepath.exists():
                 logger.warning(f"File not found: {filepath}, skipping...")
-                return None
-                
+                return
             with open(filepath, 'r') as f:
                 nutrition_data = json.load(f)
-            
-            # Convert to DataFrame
-            if isinstance(nutrition_data, list):
-                df = pd.DataFrame(nutrition_data)
-            else:
-                df = pd.json_normalize(nutrition_data)
-            
-            # Keep only specified nutritional columns
-            nutrition_columns = [
-                'name', 'protein', 'carbs', 'fats', 'fiber', 
-                'vitamin_b', 'vitamin_d', 'calcium', 'iron', 
-                'magnesium', 'zinc', 'potassium', 'calories'
-            ]
-            
-            # Filter columns that exist in the dataset
-            available_columns = [col for col in nutrition_columns if col in df.columns]
-            if available_columns:
-                df = df[available_columns]
-            
-            # Clean and standardize
-            if 'name' in df.columns:
-                df = df.dropna(subset=['name'])  # Remove entries without food names
-                df['name'] = df['name'].str.lower().str.strip()
-            
-            # Handle missing nutritional values
-            numeric_columns = df.select_dtypes(include=[np.number]).columns
-            for col in numeric_columns:
-                df[col].fillna(0, inplace=True)
-            
+            df = pd.DataFrame(nutrition_data)
             self.data_sources['nutrition'] = df
-            logger.info(f"Processed nutrition data: {len(df)} records")
-            return df
-            
+            logger.info(f"Extracted nutrition data: {len(df)} records")
         except Exception as e:
             logger.error(f"Error processing nutrition data: {e}")
-            return None
-    
-    def create_user_mapping(self):
-        """Create unified user mapping across datasets"""
-        logger.info("Creating user mapping...")
+
+    # TRANSFORM 
+    def _clean_text_list(self, text):
+        """Helper to split comma-separated strings into a clean list."""
+        if not isinstance(text, str):
+            return []
+        # Remove "and", split by comma or newline, strip whitespace, remove empty
+        items = re.split(r'[,\n]| and ', text.lower())
+        return [item.strip() for item in items if item.strip()]
+
+    def transform_data(self):
+        """
+        Main transformation function.
+        Orchestrates the transformation of raw data into a Snowflake Schema.
+        """
+        logger.info("Starting data transformation for Data Warehouse...")
         
-        user_mapping = {}
+        # 1. Create Staging Data (similar to your old 'transform_and_integrate_data')
+        self._create_staging_data()
+        
+        # 2. Generate Master Date Dimension
+        self._create_dim_date()
+        
+        # 3. Create Dimension DataFrames
+        self._create_dimensions()
+        
+        # 4. Create Bridge Table DataFrames
+        self._create_bridges()
+        
+        # 5. Create Fact Table DataFrames
+        self._create_facts()
+        
+        logger.info("Data transformation into Snowflake Schema completed.")
+
+    def _create_user_mapping(self):
+        """Create unified user mapping across datasets."""
+        logger.info("Creating user mapping...")
         next_user_id = 1
         
-        # Process Fitbit users
+        # Note: This is a simple UNION of users, not true entity resolution.
+        # It assumes every row from every source is a unique user profile.
+        
         if 'fitbit' in self.data_sources:
             fitbit_users = set()
             for dataset in self.data_sources['fitbit'].values():
                 if 'Id' in dataset.columns:
                     fitbit_users.update(dataset['Id'].unique())
-            
             for user_id in fitbit_users:
-                user_mapping[f"fitbit_{user_id}"] = {
-                    'unified_id': next_user_id,
-                    'source': 'fitbit',
-                    'original_id': user_id
-                }
+                self.user_mapping[f"fitbit_{user_id}"] = next_user_id
                 next_user_id += 1
         
-        # Process gym members (create synthetic IDs if not present)
         if 'gym_members' in self.data_sources:
             gym_df = self.data_sources['gym_members']
             for idx in gym_df.index:
-                user_mapping[f"gym_{idx}"] = {
-                    'unified_id': next_user_id,
-                    'source': 'gym',
-                    'original_id': idx
-                }
+                self.user_mapping[f"gym_{idx}"] = next_user_id
                 next_user_id += 1
-        
-        # Process Mendeley users
+                
         if 'mendeley_health' in self.data_sources:
             mendeley_df = self.data_sources['mendeley_health']
             for idx in mendeley_df.index:
-                user_mapping[f"mendeley_{idx}"] = {
-                    'unified_id': next_user_id,
-                    'source': 'mendeley',
-                    'original_id': idx
-                }
+                self.user_mapping[f"mendeley_{idx}"] = next_user_id
                 next_user_id += 1
-        
-        self.user_mapping = user_mapping
-        logger.info(f"Created user mapping for {len(user_mapping)} users")
-        return user_mapping
-    
-    def transform_and_integrate_data(self):
-        """Transform and integrate all datasets"""
-        logger.info("Starting data transformation and integration...")
-        
-        # Create unified user profiles
-        user_profiles = []
-        
-        # Process Fitbit data
-        if 'fitbit' in self.data_sources:
-            fitbit_data = self.data_sources['fitbit']
-            
-            # Merge Fitbit datasets by user ID
-            if 'daily_activity' in fitbit_data and 'weight_log' in fitbit_data:
-                merged_fitbit = fitbit_data['daily_activity'].merge(
-                    fitbit_data['weight_log'], on='Id', how='outer'
-                )
                 
-                for _, row in merged_fitbit.iterrows():
-                    profile = {
-                        'unified_user_id': self.user_mapping.get(f"fitbit_{row['Id']}", {}).get('unified_id'),
-                        'source': 'fitbit',
-                        'age': None,  # Not available in Fitbit data
-                        'weight': row.get('WeightKg'),
-                        'height': None,  # Not available
-                        'bmi': row.get('BMI'),
-                        'total_steps': row.get('TotalSteps'),
-                        'total_distance': row.get('TotalDistance'),
-                        'calories_burned': row.get('Calories'),
-                        'fitness_goal': 'maintain_health'  # Default for Fitbit users
-                    }
-                    user_profiles.append(profile)
-            elif 'daily_activity' in fitbit_data:
-                # Process only daily activity if weight log is not available
-                for _, row in fitbit_data['daily_activity'].iterrows():
-                    profile = {
-                        'unified_user_id': self.user_mapping.get(f"fitbit_{row['Id']}", {}).get('unified_id'),
-                        'source': 'fitbit',
-                        'age': None,
-                        'weight': None,
-                        'height': None,
-                        'bmi': None,
-                        'total_steps': row.get('TotalSteps'),
-                        'total_distance': row.get('TotalDistance'),
-                        'calories_burned': row.get('Calories'),
-                        'fitness_goal': 'maintain_health'
-                    }
-                    user_profiles.append(profile)
-        
-        # Process gym members data
-        if 'gym_members' in self.data_sources:
-            gym_df = self.data_sources['gym_members']
-            
-            for idx, row in gym_df.iterrows():
-                profile = {
-                    'unified_user_id': self.user_mapping.get(f"gym_{idx}", {}).get('unified_id'),
-                    'source': 'gym',
-                    'age': row.get('age'),
-                    'weight': row.get('weight_kg'),
-                    'height': row.get('height_m'),
-                    'bmi': row.get('bmi'),
-                    'max_bpm': row.get('max_bpm'),
-                    'avg_bpm': row.get('avg_bpm'),
-                    'resting_bpm': row.get('resting_bpm'),
-                    'session_duration': row.get('session_duration_hours'),
-                    'calories_burned': row.get('calories_burned'),
-                    'workout_type': row.get('workout_type'),
-                    'experience_level': row.get('experience_level'),
-                    'workout_frequency': row.get('workout_frequency_days_week'),
-                    'fitness_goal': self._standardize_fitness_goal(row.get('workout_type'))
-                }
-                user_profiles.append(profile)
-        
-        # Process Mendeley health data
-        if 'mendeley_health' in self.data_sources:
-            mendeley_df = self.data_sources['mendeley_health']
-            
-            for idx, row in mendeley_df.iterrows():
-                profile = {
-                    'unified_user_id': self.user_mapping.get(f"mendeley_{idx}", {}).get('unified_id'),
-                    'source': 'mendeley',
-                    'age': row.get('age'),
-                    'gender': row.get('sex'),
-                    'weight': row.get('weight'),
-                    'height': row.get('height'),
-                    'health_conditions': row.get('health_conditions'),
-                    'fitness_goal': self._standardize_fitness_goal(row.get('fitness_goals')),
-                    'fitness_type': row.get('fitness_type'),
-                    'workout_preference': row.get('workout'),
-                    'diet_preference': row.get('diet_nutritions')
-                }
-                user_profiles.append(profile)
-        
-        self.processed_data['user_profiles'] = pd.DataFrame(user_profiles)
-        
-        # Process workout sessions
-        self._create_workout_sessions()
-        
-        # Process health metrics
-        self._create_health_metrics()
-        
-        logger.info("Data transformation and integration completed")
-    
+        logger.info(f"Created user mapping for {len(self.user_mapping)} total user entries")
+
     def _standardize_fitness_goal(self, goal_text):
-        """Standardize fitness goals to our 4 main categories"""
-        if not goal_text:
+        """Standardize fitness goals using config mapping."""
+        if not isinstance(goal_text, str):
             return 'maintain_health'
-        
         goal_text = str(goal_text).lower()
         
-        if any(word in goal_text for word in ['lose', 'weight loss', 'fat loss']):
-            return 'lose_weight'
-        elif any(word in goal_text for word in ['muscle', 'strength', 'hypertrophy', 'build']):
-            return 'build_muscle'
-        elif any(word in goal_text for word in ['endurance', 'cardio', 'running', 'cycling']):
-            return 'endurance'
-        else:
-            return 'maintain_health'
-    
-    def _create_workout_sessions(self):
-        """Create unified workout sessions data"""
-        workout_sessions = []
+        for key, keywords in self.config['FITNESS_GOALS'].items():
+            if any(word in goal_text for word in keywords):
+                return key
+        return 'maintain_health'
+
+    def _create_staging_data(self):
+        """Integrate sources into a single staging DataFrame for users."""
+        logger.info("Creating staging data...")
+        self._create_user_mapping()
+        user_profiles_staging = []
         
-        # From gym members data
+        # Process Mendeley data (richest source for preferences)
+        if 'mendeley_health' in self.data_sources:
+            df = self.data_sources['mendeley_health'].copy()
+            df.columns = df.columns.str.lower().str.replace(' ', '_')
+            for idx, row in df.iterrows():
+                user_key = self.user_mapping.get(f"mendeley_{idx}")
+                profile = {
+                    'UserKey': user_key,
+                    'Source': 'mendeley',
+                    'OriginalID': idx,
+                    'Age': row.get('age'),
+                    'Gender': row.get('sex'),
+                    'Weight': row.get('weight'),
+                    'Height': row.get('height'),
+                    'BMI': row.get('bmi'),
+                    'HealthConditions': row.get('health_conditions'), # TEXT Blob
+                    'FitnessGoal': self._standardize_fitness_goal(row.get('fitness_goals')),
+                    'FitnessType': row.get('fitness_type'),
+                    'WorkoutPreference': row.get('workout'), # TEXT Blob
+                    'DietPreference': row.get('diet_nutritions'), # TEXT Blob
+                    'ExperienceLevel': None,
+                    'ActivityLevel': None
+                }
+                user_profiles_staging.append(profile)
+
+        # Process Gym Members data
         if 'gym_members' in self.data_sources:
-            gym_df = self.data_sources['gym_members']
-            
-            for idx, row in gym_df.iterrows():
-                session = {
-                    'unified_user_id': self.user_mapping.get(f"gym_{idx}", {}).get('unified_id'),
-                    'workout_type': row.get('workout_type'),
-                    'duration_hours': row.get('session_duration_hours'),
-                    'calories_burned': row.get('calories_burned'),
-                    'experience_level': row.get('experience_level'),
-                    'frequency_per_week': row.get('workout_frequency_days_week'),
-                    'session_date': datetime.now().date()  # Synthetic date for now
+            df = self.data_sources['gym_members'].copy()
+            df.columns = df.columns.str.lower().str.replace(' ', '_')
+            for idx, row in df.iterrows():
+                user_key = self.user_mapping.get(f"gym_{idx}")
+                profile = {
+                    'UserKey': user_key,
+                    'Source': 'gym',
+                    'OriginalID': idx,
+                    'Age': row.get('age'),
+                    'Gender': row.get('gender'),
+                    'Weight': row.get('weight_kg'),
+                    'Height': row.get('height_m'),
+                    'BMI': row.get('bmi'),
+                    'HealthConditions': None,
+                    'FitnessGoal': self._standardize_fitness_goal(row.get('workout_type')),
+                    'FitnessType': row.get('workout_type'),
+                    'WorkoutPreference': row.get('workout_type'),
+                    'DietPreference': None,
+                    'ExperienceLevel': row.get('experience_level'),
+                    'ActivityLevel': None
                 }
-                workout_sessions.append(session)
-        
-        # From Fitbit daily activity
-        if 'fitbit' in self.data_sources and 'daily_activity' in self.data_sources['fitbit']:
-            daily_activity = self.data_sources['fitbit']['daily_activity']
-            
-            for _, row in daily_activity.iterrows():
-                session = {
-                    'unified_user_id': self.user_mapping.get(f"fitbit_{row['Id']}", {}).get('unified_id'),
-                    'workout_type': 'mixed',
-                    'total_steps': row.get('TotalSteps'),
-                    'total_distance': row.get('TotalDistance'),
-                    'calories_burned': row.get('Calories'),
-                    'active_minutes': row.get('VeryActiveMinutes', 0) + row.get('FairlyActiveMinutes', 0),
-                    'session_date': datetime.now().date()
-                }
-                workout_sessions.append(session)
-        
-        self.processed_data['workout_sessions'] = pd.DataFrame(workout_sessions)
-    
-    def _create_health_metrics(self):
-        """Create unified health metrics data"""
-        health_metrics = []
-        
-        # From Fitbit sleep and heart rate data
+                user_profiles_staging.append(profile)
+
+        # Process Fitbit data
         if 'fitbit' in self.data_sources:
-            fitbit_data = self.data_sources['fitbit']
-            
-            if 'sleep_minutes' in fitbit_data:
-                sleep_df = fitbit_data['sleep_minutes']
-                for _, row in sleep_df.iterrows():
-                    metric = {
-                        'unified_user_id': self.user_mapping.get(f"fitbit_{row['Id']}", {}).get('unified_id'),
-                        'metric_type': 'sleep',
-                        'value': row.get('hours_sleep'),
-                        'unit': 'hours',
-                        'measurement_date': row.get('date')
-                    }
-                    health_metrics.append(metric)
-            
-            if 'heartrate' in fitbit_data:
-                hr_df = fitbit_data['heartrate']
-                for _, row in hr_df.iterrows():
-                    metric = {
-                        'unified_user_id': self.user_mapping.get(f"fitbit_{row['Id']}", {}).get('unified_id'),
-                        'metric_type': 'heart_rate',
-                        'value': row.get('avg_heartrate'),
-                        'unit': 'bpm',
-                        'measurement_date': row.get('Date')
-                    }
-                    health_metrics.append(metric)
+            # We'll just create user shells from fitbit.
+            # Facts (weight, sleep) will be loaded into fact tables.
+            fitbit_user_keys = {k: v for k, v in self.user_mapping.items() if k.startswith('fitbit_')}
+            for key, user_key in fitbit_user_keys.items():
+                original_id = key.replace('fitbit_', '')
+                profile = {
+                    'UserKey': user_key,
+                    'Source': 'fitbit',
+                    'OriginalID': original_id,
+                    'Age': None, 'Gender': None, 'Weight': None, 'Height': None, 'BMI': None,
+                    'HealthConditions': None, 'FitnessGoal': 'maintain_health', 'FitnessType': None,
+                    'WorkoutPreference': None, 'DietPreference': None, 'ExperienceLevel': None, 'ActivityLevel': None
+                }
+                user_profiles_staging.append(profile)
+
+        self.staging_data['user_profiles'] = pd.DataFrame(user_profiles_staging).set_index('UserKey')
+        logger.info(f"Staging user profiles created: {len(self.staging_data['user_profiles'])} records")
+
+    def _create_dim_date(self, start='2020-01-01', end='2025-12-31'):
+        """Create a master date dimension table."""
+        logger.info("Creating Dim_Date...")
+        df = pd.DataFrame({'FullDate': pd.date_range(start, end)})
+        df['DateKey'] = df['FullDate'].dt.strftime('%Y%m%d').astype(int)
+        df['DayOfWeek'] = df['FullDate'].dt.dayofweek
+        df['DayName'] = df['FullDate'].dt.day_name()
+        df['Month'] = df['FullDate'].dt.month
+        df['MonthName'] = df['FullDate'].dt.month_name()
+        df['Quarter'] = df['FullDate'].dt.quarter
+        df['Year'] = df['FullDate'].dt.year
+        df = df.set_index('DateKey')
+        self.warehouse_data['Dim_Date'] = df
         
-        self.processed_data['health_metrics'] = pd.DataFrame(health_metrics)
-    
+        # Create a lookup map for faster fact creation
+        self.date_lookup = df['FullDate'].to_dict()
+        self.date_lookup_rev = {v.strftime('%Y-%m-%d'): k for k, v in self.date_lookup.items()}
+
+    def _create_dimensions(self):
+        """Create all dimension DataFrames from staging data."""
+        logger.info("Creating Dimension tables...")
+        staging_df = self.staging_data['user_profiles']
+
+        # Dim_User
+        cols = ['Source', 'OriginalID', 'Age', 'Gender', 'ExperienceLevel', 'ActivityLevel']
+        self.warehouse_data['Dim_User'] = staging_df[cols]
+        
+        # Dim_FitnessGoal
+        goals = staging_df['FitnessGoal'].dropna().unique()
+        self.warehouse_data['Dim_FitnessGoal'] = pd.DataFrame(goals, columns=['GoalName'])
+        self.warehouse_data['Dim_FitnessGoal'].index.name = 'GoalKey'
+        self.warehouse_data['Dim_FitnessGoal'].index += 1 # Start IDs from 1
+        
+        # Dim_FitnessType
+        types = staging_df['FitnessType'].dropna().unique()
+        self.warehouse_data['Dim_FitnessType'] = pd.DataFrame(types, columns=['TypeName'])
+        self.warehouse_data['Dim_FitnessType'].index.name = 'TypeKey'
+        self.warehouse_data['Dim_FitnessType'].index += 1
+
+        # Dim_HealthCondition, Dim_Exercise, Dim_Diet (from TEXT blobs)
+        self.warehouse_data['Dim_HealthCondition'] = self._create_dim_from_blob('HealthConditions', 'ConditionName')
+        self.warehouse_data['Dim_Exercise'] = self._create_dim_from_blob('WorkoutPreference', 'ExerciseName')
+        self.warehouse_data['Dim_Diet'] = self._create_dim_from_blob('DietPreference', 'DietName')
+
+        # Dim_FoodItem
+        if 'nutrition' in self.data_sources:
+            df = self.data_sources['nutrition'].copy()
+            df = df.rename(columns={'name': 'FoodName', 'category': 'FoodCategory'})
+            cols = ['FoodName', 'FoodCategory', 'calories', 'protein', 'carbs', 'fats', 'fiber']
+            df = df[[c for c in cols if c in df.columns]].dropna(subset=['FoodName']).drop_duplicates(subset=['FoodName'])
+            df = df.reset_index(drop=True)
+            df.index.name = 'FoodKey'
+            df.index += 1
+            self.warehouse_data['Dim_FoodItem'] = df
+
+        # Dimensions for workout/metric types (static)
+        self.warehouse_data['Dim_MetricType'] = pd.DataFrame(
+            {'MetricName': ['heart_rate', 'sleep', 'weight', 'bmi']},
+            index=pd.Index(range(1, 5), name='MetricTypeKey')
+        )
+        self.warehouse_data['Dim_WorkoutType'] = pd.DataFrame(
+            {'WorkoutName': staging_df['FitnessType'].dropna().unique()}, # Reuse fitness types
+            index=pd.Index(range(1, len(staging_df['FitnessType'].dropna().unique()) + 1), name='WorkoutTypeKey')
+        )
+        self.warehouse_data['Dim_MealType'] = pd.DataFrame(
+            {'MealName': ['breakfast', 'lunch', 'dinner', 'snack']},
+            index=pd.Index(range(1, 5), name='MealTypeKey')
+        )
+        
+        # Create lookup maps for bridges and facts
+        self.goal_lookup = {name: key for key, name in self.warehouse_data['Dim_FitnessGoal']['GoalName'].to_dict().items()}
+        self.type_lookup = {name: key for key, name in self.warehouse_data['Dim_FitnessType']['TypeName'].to_dict().items()}
+        self.condition_lookup = {name: key for key, name in self.warehouse_data['Dim_HealthCondition']['ConditionName'].to_dict().items()}
+        self.exercise_lookup = {name: key for key, name in self.warehouse_data['Dim_Exercise']['ExerciseName'].to_dict().items()}
+        self.diet_lookup = {name: key for key, name in self.warehouse_data['Dim_Diet']['DietName'].to_dict().items()}
+        self.metric_type_lookup = {name: key for key, name in self.warehouse_data['Dim_MetricType']['MetricName'].to_dict().items()}
+        self.workout_type_lookup = {name: key for key, name in self.warehouse_data['Dim_WorkoutType']['WorkoutName'].to_dict().items()}
+
+    def _create_dim_from_blob(self, column_name, dim_name):
+        """Helper to parse a TEXT blob column into a unique Dimension DataFrame."""
+        staging_df = self.staging_data['user_profiles']
+        all_items = set()
+        staging_df[column_name].dropna().apply(lambda x: all_items.update(self._clean_text_list(x)))
+        df = pd.DataFrame(list(all_items), columns=[dim_name])
+        df = df.reset_index()
+        df = df.rename(columns={'index': f"{dim_name.replace('Name', 'Key')}"})
+        df[f"{dim_name.replace('Name', 'Key')}"] += 1
+        return df.set_index(f"{dim_name.replace('Name', 'Key')}")
+
+    def _create_bridges(self):
+        """Create all bridge DataFrames."""
+        logger.info("Creating Bridge tables...")
+        staging_df = self.staging_data['user_profiles']
+        
+        self.warehouse_data['Bridge_User_HealthCondition'] = self._create_bridge_from_blob(
+            staging_df, 'HealthConditions', self.condition_lookup, 'ConditionKey'
+        )
+        self.warehouse_data['Bridge_User_WorkoutPreference'] = self._create_bridge_from_blob(
+            staging_df, 'WorkoutPreference', self.exercise_lookup, 'ExerciseKey'
+        )
+        self.warehouse_data['Bridge_User_DietPreference'] = self._create_bridge_from_blob(
+            staging_df, 'DietPreference', self.diet_lookup, 'DietKey'
+        )
+        
+    def _create_bridge_from_blob(self, staging_df, column_name, lookup_map, key_name):
+        """Helper to create a bridge table DataFrame."""
+        bridge_data = []
+        for user_key, row in staging_df.iterrows():
+            items = self._clean_text_list(row[column_name])
+            for item in items:
+                item_key = lookup_map.get(item)
+                if item_key:
+                    bridge_data.append({
+                        'UserKey': user_key,
+                        key_name: item_key
+                    })
+        return pd.DataFrame(bridge_data).drop_duplicates()
+
+    def _create_facts(self):
+        """Create all fact DataFrames."""
+        logger.info("Creating Fact tables...")
+        
+        # Fact_UserSnapshot
+        staging_df = self.staging_data['user_profiles']
+        snapshot_df = staging_df[['Height', 'Weight', 'BMI', 'FitnessGoal', 'FitnessType']].copy()
+        snapshot_df['GoalKey'] = snapshot_df['FitnessGoal'].map(self.goal_lookup)
+        snapshot_df['TypeKey'] = snapshot_df['FitnessType'].map(self.type_lookup)
+        self.warehouse_data['Fact_UserSnapshot'] = snapshot_df[['GoalKey', 'TypeKey', 'Height', 'Weight', 'BMI']].reset_index()
+
+        # Fact_HealthMetric & Fact_WorkoutSession
+        self._create_facts_from_fitbit()
+
+    def _create_facts_from_fitbit(self):
+        """Parse fitbit data into Fact_HealthMetric and Fact_WorkoutSession."""
+        if 'fitbit' not in self.data_sources:
+            return
+
+        health_metrics = []
+        workout_sessions = []
+        fitbit_data = self.data_sources['fitbit']
+
+        # Process sleep
+        if 'sleep_minutes' in fitbit_data:
+            df = fitbit_data['sleep_minutes'].copy()
+            df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+            df = df.groupby(['Id', 'date'])['value'].sum().reset_index()
+            for _, row in df.iterrows():
+                user_key = self.user_mapping.get(f"fitbit_{row['Id']}")
+                date_key = self.date_lookup_rev.get(row['date'])
+                if user_key and date_key:
+                    health_metrics.append({
+                        'UserKey': user_key, 'DateKey': date_key,
+                        'MetricTypeKey': self.metric_type_lookup['sleep'],
+                        'Value': row['value'] / 60, # Convert to hours
+                        'Unit': 'hours'
+                    })
+                    
+        # Process heartrate
+        if 'heartrate' in fitbit_data:
+            df = fitbit_data['heartrate'].copy()
+            df['Time'] = pd.to_datetime(df['Time'])
+            df['Date'] = df['Time'].dt.strftime('%Y-%m-%d')
+            df = df.groupby(['Id', 'Date'])['Value'].mean().reset_index()
+            for _, row in df.iterrows():
+                user_key = self.user_mapping.get(f"fitbit_{row['Id']}")
+                date_key = self.date_lookup_rev.get(row['Date'])
+                if user_key and date_key:
+                    health_metrics.append({
+                        'UserKey': user_key, 'DateKey': date_key,
+                        'MetricTypeKey': self.metric_type_lookup['heart_rate'],
+                        'Value': row['Value'], 'Unit': 'bpm'
+                    })
+
+        # Process weight
+        if 'weight_log' in fitbit_data:
+            df = fitbit_data['weight_log'].copy()
+            df['Date'] = pd.to_datetime(df['Date']).dt.strftime('%Y-%m-%d')
+            for _, row in df.iterrows():
+                user_key = self.user_mapping.get(f"fitbit_{row['Id']}")
+                date_key = self.date_lookup_rev.get(row['Date'])
+                if user_key and date_key:
+                    health_metrics.append({'UserKey': user_key, 'DateKey': date_key,
+                                           'MetricTypeKey': self.metric_type_lookup['weight'],
+                                           'Value': row['WeightKg'], 'Unit': 'kg'})
+                    health_metrics.append({'UserKey': user_key, 'DateKey': date_key,
+                                           'MetricTypeKey': self.metric_type_lookup['bmi'],
+                                           'Value': row['BMI'], 'Unit': 'bmi'})
+
+        # Process daily activity as workout sessions
+        if 'daily_activity' in fitbit_data:
+            df = fitbit_data['daily_activity'].copy()
+            df['ActivityDate'] = pd.to_datetime(df['ActivityDate']).dt.strftime('%Y-%m-%d')
+            for _, row in df.iterrows():
+                user_key = self.user_mapping.get(f"fitbit_{row['Id']}")
+                date_key = self.date_lookup_rev.get(row['ActivityDate'])
+                if user_key and date_key:
+                    workout_sessions.append({
+                        'UserKey': user_key, 'DateKey': date_key,
+                        'WorkoutTypeKey': self.workout_type_lookup.get('mixed'), # Default
+                        'DurationHours': (row['VeryActiveMinutes'] + row['FairlyActiveMinutes']) / 60,
+                        'CaloriesBurned': row['Calories'],
+                        'TotalSteps': row['TotalSteps'],
+                        'TotalDistance': row['TotalDistance'],
+                        'ActiveMinutes': row['VeryActiveMinutes'] + row['FairlyActiveMinutes'],
+                        'FrequencyPerWeek': None # This would be calculated in analysis, not ETL
+                    })
+        
+        self.warehouse_data['Fact_HealthMetric'] = pd.DataFrame(health_metrics)
+        self.warehouse_data['Fact_WorkoutSession'] = pd.DataFrame(workout_sessions)
+        logger.info(f"Created Fact_HealthMetric: {len(self.warehouse_data['Fact_HealthMetric'])} records")
+        logger.info(f"Created Fact_WorkoutSession: {len(self.warehouse_data['Fact_WorkoutSession'])} records")
+
+    # LOAD 
     def create_database_schema(self):
-        """Create MySQL database schema"""
-        logger.info("Creating MySQL database schema...")
-        
-        schema_sql = """
-        -- Drop existing tables if they exist
-        DROP TABLE IF EXISTS health_metrics;
-        DROP TABLE IF EXISTS workout_sessions;
-        DROP TABLE IF EXISTS nutrition_data;
-        DROP TABLE IF EXISTS user_profiles;
-        
-        -- Create user_profiles table
-        CREATE TABLE user_profiles (
-            unified_user_id INT AUTO_INCREMENT PRIMARY KEY,
-            source VARCHAR(50),
-            age INT,
-            gender VARCHAR(10),
-            weight DECIMAL(5,2),
-            height DECIMAL(5,2),
-            bmi DECIMAL(5,2),
-            fitness_goal VARCHAR(50),
-            fitness_type VARCHAR(50),
-            workout_preference TEXT,
-            diet_preference TEXT,
-            health_conditions TEXT,
-            experience_level VARCHAR(20),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Create workout_sessions table
-        CREATE TABLE workout_sessions (
-            session_id INT AUTO_INCREMENT PRIMARY KEY,
-            unified_user_id INT,
-            workout_type VARCHAR(50),
-            duration_hours DECIMAL(4,2),
-            calories_burned INT,
-            total_steps INT,
-            total_distance DECIMAL(6,2),
-            active_minutes INT,
-            frequency_per_week INT,
-            session_date DATE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (unified_user_id) REFERENCES user_profiles(unified_user_id)
-        );
-        
-        -- Create health_metrics table
-        CREATE TABLE health_metrics (
-            metric_id INT AUTO_INCREMENT PRIMARY KEY,
-            unified_user_id INT,
-            metric_type VARCHAR(50),
-            value DECIMAL(10,2),
-            unit VARCHAR(20),
-            measurement_date DATE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (unified_user_id) REFERENCES user_profiles(unified_user_id)
-        );
-        
-        -- Create nutrition_data table
-        CREATE TABLE nutrition_data (
-            food_id INT AUTO_INCREMENT PRIMARY KEY,
-            food_name VARCHAR(200),
-            calories DECIMAL(8,2),
-            protein DECIMAL(6,2),
-            carbs DECIMAL(6,2),
-            fats DECIMAL(6,2),
-            fiber DECIMAL(6,2),
-            vitamin_b DECIMAL(6,2),
-            vitamin_d DECIMAL(6,2),
-            calcium DECIMAL(6,2),
-            iron DECIMAL(6,2),
-            magnesium DECIMAL(6,2),
-            zinc DECIMAL(6,2),
-            potassium DECIMAL(8,2),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        -- Create indexes for better performance
-        CREATE INDEX idx_user_profiles_goal ON user_profiles(fitness_goal);
-        CREATE INDEX idx_workout_sessions_user ON workout_sessions(unified_user_id);
-        CREATE INDEX idx_workout_sessions_date ON workout_sessions(session_date);
-        CREATE INDEX idx_health_metrics_user ON health_metrics(unified_user_id);
-        CREATE INDEX idx_health_metrics_type ON health_metrics(metric_type);
-        CREATE INDEX idx_nutrition_name ON nutrition_data(food_name);
         """
-        
+        Executes the external db_schema.sql file to create the warehouse.
+        """
+        logger.info("Executing db_schema.sql to create Data Warehouse schema...")
         try:
+            schema_path = Path('db_schema.sql')
+            if not schema_path.exists():
+                logger.error("db_schema.sql not found! Cannot create schema.")
+                raise FileNotFoundError("db_schema.sql not found")
+                
+            with open(schema_path, 'r') as f:
+                schema_sql = f.read()
+            
             # Split the schema into individual statements
             statements = [stmt.strip() for stmt in schema_sql.split(';') if stmt.strip()]
             
             with self.engine.connect() as connection:
                 for statement in statements:
                     if statement:
+                        # Skip comments
+                        if statement.startswith('--'):
+                            continue
                         connection.execute(text(statement))
                 connection.commit()
-            logger.info("MySQL database schema created successfully")
+            logger.info("Data Warehouse schema created successfully")
         except Exception as e:
             logger.error(f"Error creating MySQL database schema: {e}")
             raise
     
     def load_data_to_database(self):
-        """Load processed data to MySQL database"""
-        logger.info("Loading data to MySQL database...")
+        """Load all transformed DataFrames into the Data Warehouse."""
+        logger.info("Loading data to Data Warehouse...")
+        
+        # Define the correct loading order (Dims -> Bridges -> Facts)
+        load_order = [
+            'Dim_Date', 'Dim_User', 'Dim_FitnessGoal', 'Dim_FitnessType', 
+            'Dim_HealthCondition', 'Dim_Exercise', 'Dim_Diet', 'Dim_FoodItem',
+            'Dim_MetricType', 'Dim_WorkoutType', 'Dim_MealType',
+            'Bridge_User_HealthCondition', 'Bridge_User_WorkoutPreference', 
+            'Bridge_User_DietPreference',
+            'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric'
+            # 'Fact_NutritionLog' is missing from transform, so it's skipped
+        ]
         
         try:
-            # Load user profiles
-            if 'user_profiles' in self.processed_data and not self.processed_data['user_profiles'].empty:
-                # Clean the dataframe for MySQL
-                user_df = self.processed_data['user_profiles'].copy()
-                
-                # Select only the columns that exist in the database schema
-                db_columns = ['unified_user_id', 'source', 'age', 'gender', 'weight', 'height', 
-                             'bmi', 'fitness_goal', 'fitness_type', 'workout_preference', 
-                             'diet_preference', 'health_conditions', 'experience_level']
-                
-                # Keep only columns that exist in the dataframe
-                available_columns = [col for col in db_columns if col in user_df.columns]
-                user_df = user_df[available_columns]
-                
-                user_df.to_sql('user_profiles', self.engine, if_exists='append', index=False)
-                logger.info(f"Loaded {len(user_df)} user profiles")
+            with self.engine.connect() as connection:
+                for table_name in load_order:
+                    if table_name in self.warehouse_data:
+                        df = self.warehouse_data[table_name]
+                        if not df.empty:
+                            logger.info(f"Loading {table_name} ({len(df)} records)...")
+                            # Get table name from DataFrame name (e.g., Dim_User -> dim_user)
+                            sql_table_name = table_name.lower()
+                            
+                            # 'index=True' is needed for Dims where the key is the index
+                            use_index = table_name.startswith('Dim_')
+                            
+                            df.to_sql(
+                                sql_table_name, 
+                                connection, 
+                                if_exists='append', 
+                                index=use_index
+                            )
+                        else:
+                            logger.info(f"Skipping {table_name} (empty DataFrame)")
+                    else:
+                        logger.warning(f"Table {table_name} not found in processed data. Skipping.")
             
-            # Load workout sessions
-            if 'workout_sessions' in self.processed_data and not self.processed_data['workout_sessions'].empty:
-                workout_df = self.processed_data['workout_sessions'].copy()
-                
-                # Select only the columns that exist in the database schema
-                db_columns = ['unified_user_id', 'workout_type', 'duration_hours', 'calories_burned',
-                             'total_steps', 'total_distance', 'active_minutes', 'frequency_per_week', 'session_date']
-                
-                available_columns = [col for col in db_columns if col in workout_df.columns]
-                workout_df = workout_df[available_columns]
-                
-                workout_df.to_sql('workout_sessions', self.engine, if_exists='append', index=False)
-                logger.info(f"Loaded {len(workout_df)} workout sessions")
-            
-            # Load health metrics
-            if 'health_metrics' in self.processed_data and not self.processed_data['health_metrics'].empty:
-                health_df = self.processed_data['health_metrics'].copy()
-                
-                db_columns = ['unified_user_id', 'metric_type', 'value', 'unit', 'measurement_date']
-                available_columns = [col for col in db_columns if col in health_df.columns]
-                health_df = health_df[available_columns]
-                
-                health_df.to_sql('health_metrics', self.engine, if_exists='append', index=False)
-                logger.info(f"Loaded {len(health_df)} health metrics")
-            
-            # Load nutrition data
-            if 'nutrition' in self.data_sources and not self.data_sources['nutrition'].empty:
-                nutrition_df = self.data_sources['nutrition'].copy()
-                nutrition_df.rename(columns={'name': 'food_name'}, inplace=True)
-                
-                # Select only the columns that exist in the database schema
-                db_columns = ['food_name', 'calories', 'protein', 'carbs', 'fats', 'fiber',
-                             'vitamin_b', 'vitamin_d', 'calcium', 'iron', 'magnesium', 'zinc', 'potassium']
-                
-                available_columns = [col for col in db_columns if col in nutrition_df.columns]
-                nutrition_df = nutrition_df[available_columns]
-                
-                nutrition_df.to_sql('nutrition_data', self.engine, if_exists='append', index=False)
-                logger.info(f"Loaded {len(nutrition_df)} nutrition records")
+            logger.info("Data Warehouse loading complete.")
             
         except Exception as e:
             logger.error(f"Error loading data to MySQL database: {e}")
             raise
-    
+
+    # VALIDATE & RUN
     def validate_data_quality(self):
-        """Perform data quality validation"""
+        """Perform data quality validation on the new data warehouse"""
         logger.info("Performing data quality validation...")
-        
         validation_results = {}
         
         try:
             with self.engine.connect() as connection:
                 # Check record counts
-                tables = ['user_profiles', 'workout_sessions', 'health_metrics', 'nutrition_data']
-                
+                tables = ['Dim_User', 'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric']
                 for table in tables:
-                    result = connection.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                    result = connection.execute(text(f"SELECT COUNT(*) FROM {table.lower()}"))
                     count = result.fetchone()[0]
                     validation_results[f"{table}_count"] = count
                     logger.info(f"{table}: {count} records")
                 
-                # Check for duplicates in user profiles
-                result = connection.execute(text("""
-                    SELECT COUNT(*) - COUNT(DISTINCT unified_user_id) as duplicates 
-                    FROM user_profiles
-                """))
-                duplicates = result.fetchone()[0]
-                validation_results['user_profile_duplicates'] = duplicates
-                
-                if duplicates > 0:
-                    logger.warning(f"Found {duplicates} duplicate user profiles")
-                
-                # Check data completeness
-                result = connection.execute(text("""
-                    SELECT 
-                        COUNT(*) as total,
-                        COUNT(age) as age_filled,
-                        COUNT(weight) as weight_filled,
-                        COUNT(fitness_goal) as goal_filled
-                    FROM user_profiles
-                """))
-                completeness = result.fetchone()
-                validation_results['data_completeness'] = {
-                    'age_completeness': completeness[1] / completeness[0] if completeness[0] > 0 else 0,
-                    'weight_completeness': completeness[2] / completeness[0] if completeness[0] > 0 else 0,
-                    'goal_completeness': completeness[3] / completeness[0] if completeness[0] > 0 else 0
-                }
-                
-                logger.info(f"Data validation completed: {validation_results}")
-                
+                # Check that bridges were populated
+                result = connection.execute(text("SELECT COUNT(*) FROM bridge_user_healthcondition"))
+                bridge_count = result.fetchone()[0]
+                validation_results['bridge_healthcondition_count'] = bridge_count
+                logger.info(f"Bridge_User_HealthCondition: {bridge_count} records")
+
         except Exception as e:
             logger.error(f"Error during data validation: {e}")
         
         return validation_results
-    
-    def generate_summary_report(self):
+
+    def generate_summary_report(self, validation_results):
         """Generate summary report for the ETL process"""
         logger.info("Generating summary report...")
-        
         report = {
-            'etl_timestamp': datetime.now(),
+            'etl_timestamp': datetime.now().isoformat(),
             'data_sources_processed': list(self.data_sources.keys()),
-            'total_users': len(self.user_mapping) if hasattr(self, 'user_mapping') else 0,
-            'processing_summary': {}
+            'total_users_mapped': len(self.user_mapping),
+            'validation_results': validation_results
         }
         
-        # Add processing details for each data source
-        for source, data in self.data_sources.items():
-            if isinstance(data, dict):
-                report['processing_summary'][source] = {
-                    'datasets': list(data.keys()),
-                    'total_records': sum(len(df) for df in data.values())
-                }
-            else:
-                report['processing_summary'][source] = {
-                    'records': len(data)
-                }
-        
-        # Add validation results if available
-        validation_results = self.validate_data_quality()
-        report['validation_results'] = validation_results
-        
-        # Save report as JSON
-        report_path = Path(self.config['output_path']) / f"etl_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        # Convert datetime objects to strings for JSON serialization
-        report_json = json.dumps(report, default=str, indent=2)
+        report_path = self.config['DATA_PATHS']['output_path'] / f"etl_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
         with open(report_path, 'w') as f:
-            f.write(report_json)
+            json.dump(report, f, indent=2)
         
         logger.info(f"Summary report saved to {report_path}")
-        return report
-    
+
     def run_full_etl_pipeline(self):
-        """Execute the complete ETL pipeline"""
-        logger.info("Starting full ETL pipeline...")
+        """Execute the complete ETL pipeline."""
+        logger.info("Starting full Data Warehouse ETL pipeline...")
         
         try:
-            # Step 1: Setup database connection
+            # 1. Setup db connection
             self.setup_database_connection()
             
-            # Step 2: Extract data from all sources
+            # 2. Extract
             self.extract_fitbit_data()
             self.extract_gym_members_data()
             self.extract_mendeley_health_data()
             self.extract_nutrition_data()
             
-            # Step 3: Create user mapping
-            self.create_user_mapping()
+            # 3. Transform
+            self.transform_data()
             
-            # Step 4: Transform and integrate data
-            self.transform_and_integrate_data()
-            
-            # Step 5: Create database schema
+            # 4. Load (Schema -> data)
             self.create_database_schema()
-            
-            # Step 6: Load data to database
             self.load_data_to_database()
             
-            # Step 7: Validate data quality
-            self.validate_data_quality()
+            # 5. Validate & Report
+            validation_results = self.validate_data_quality()
+            self.generate_summary_report(validation_results)
             
-            # Step 8: Generate summary report
-            self.generate_summary_report()
-            
-            logger.info("ETL pipeline completed successfully!")
+            logger.info("Data Warehouse ETL pipeline completed successfully.")
             
         except Exception as e:
-            logger.error(f"ETL pipeline failed: {e}")
+            logger.error(f"ETL pipeline FAILED: {e}", exc_info=True)
             raise
 
+
+# MAIN EXECUTION
 def main():
-    """Main function to run the ETL pipeline"""
+    """Main func to run the ETL pipeline"""
     
-    # Configuration
-    config = {
-        'data_path': './data',  # Path to your data files
-        'output_path': './output',
-        'db_host': 'localhost',
-        'db_port': '3306',
-        'db_name': 'fitness_nutrition_db',
-        'db_user': 'your_username',
-        'db_password': 'your_password'
-    }
-    
-    # Create output directory if it doesn't exist
-    Path(config['output_path']).mkdir(parents=True, exist_ok=True)
-    
-    # Initialize and run ETL pipeline
-    etl = FitnessNutritionETL(config)
-    etl.run_full_etl_pipeline()
+    # use the config from confic.py
+    try:
+        import config as cfg
+        
+        config = {
+            'DATABASE_CONFIG': cfg.DATABASE_CONFIG,
+            'DATA_PATHS': cfg.DATA_PATHS,
+            'ETL_CONFIG': cfg.ETL_CONFIG,
+            'FITNESS_GOALS': cfg.FITNESS_GOALS,
+            'QUALITY_THRESHOLDS': cfg.QUALITY_THRESHOLDS
+        }
+        
+        # create output directory
+        Path(config['DATA_PATHS']['output_path']).mkdir(parents=True, exist_ok=True)
+        
+        etl = FitnessNutritionETL(config)
+        etl.run_full_etl_pipeline()
+        
+    except ImportError:
+        logger.error("config.py not found. Please create it with your credentials.")
+    except Exception as e:
+        logger.error(f"An error occurred during pipeline execution: {e}")
 
 if __name__ == "__main__":
     main()

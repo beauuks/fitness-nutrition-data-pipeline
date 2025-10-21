@@ -25,20 +25,21 @@ DATA_PATHS = {
     'output_path': Path('./output')
 }
 
-# ETL Configuration
-ETL_CONFIG = {
-    'batch_size': 1000,
-    'max_retries': 3,
-    'timeout_seconds': 300,
-    'log_level': 'INFO'
-}
-
 # Fitness Goals Mapping
 FITNESS_GOALS = {
     'lose_weight': ['lose', 'weight loss', 'fat loss', 'cut'],
     'build_muscle': ['muscle', 'strength', 'hypertrophy', 'build', 'gain'],
     'endurance': ['endurance', 'cardio', 'running', 'cycling', 'marathon'],
     'maintain_health': ['maintain', 'health', 'wellness', 'balance']
+}
+
+# NOT USED
+# ETL Configuration
+ETL_CONFIG = {
+    'batch_size': 1000,
+    'max_retries': 3,
+    'timeout_seconds': 300,
+    'log_level': 'INFO'
 }
 
 # Data Quality Thresholds
