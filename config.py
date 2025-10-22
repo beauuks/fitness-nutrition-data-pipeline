@@ -10,10 +10,10 @@ from pathlib import Path
 # Database Configuration for MySQL
 DATABASE_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
-    'port': os.getenv('DB_PORT', '3306'),
-    'database': os.getenv('DB_NAME', 'fitness_nutrition_db'),
-    'username': os.getenv('DB_USER', 'your_username'),
-    'password': os.getenv('DB_PASSWORD', 'your_password')
+    'port': os.getenv('DB_PORT', '3306'), # default port for mysql = 3306
+    'database': os.getenv('DB_NAME', 'fitness_nutrition_dw'),
+    'username': os.getenv('DB_USER', 'username'),
+    'password': os.getenv('DB_PASSWORD', 'mysupersecretpw12345678')
 }
 
 # Data Paths Configuration
@@ -22,7 +22,7 @@ DATA_PATHS = {
     'fitbit_path': Path('./data/fitbit'),
     'gym_members_file': Path('./data/gym_members_exercise_tracking.csv'),
     'mendeley_file': Path('./data/gym_recommendation.xlsx'),
-    'nutrition_file': Path('./data/nutrition_dataset.xlsx'),
+    'nutrition_file': Path('./data/nutrition.xlsx'),
     'output_path': Path('./output')
 }
 
