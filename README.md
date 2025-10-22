@@ -45,3 +45,137 @@ This model is optimized for high-speed, complex `GROUP BY` and `JOIN` queries es
 - **Fact Tables (Green)**: Store the "measures" or numbers (e.g., Weight, CaloriesBurned).
 - **Dimension Tables (Blue)**: Store the "context" or categories (e.g., UserName, ExerciseName).
 - **Bridge Tables (Yellow)**: Connect dimensions with many-to-many relationships (e.g., a User can have many Health Conditions).
+
+```mermaid
+erDiagram
+    %% --- Fact Tables ---
+    Fact_UserSnapshot {
+        int SnapshotKey PK
+        int UserKey FK
+        int GoalKey FK
+        int TypeKey FK
+        decimal Height
+        decimal Weight
+        decimal BMI
+    }
+    Fact_WorkoutSession {
+        int SessionKey PK
+        int UserKey FK
+        int DateKey FK
+        int WorkoutTypeKey FK
+        decimal DurationHours
+        int CaloriesBurned
+        int TotalSteps
+    }
+    Fact_HealthMetric {
+        int MetricKey PK
+        int UserKey FK
+        int DateKey FK
+        int MetricTypeKey FK
+        decimal Value
+        string Unit
+    }
+    Fact_NutritionLog {
+        int LogKey PK
+        int UserKey FK
+        int DateKey FK
+        int FoodKey FK
+        int MealTypeKey FK
+        decimal ServingAmount
+    }
+
+    %% --- Dimensions ---
+    Dim_User {
+        int UserKey PK
+        string Source
+        int Age
+        string Gender
+    }
+    Dim_Date {
+        int DateKey PK
+        date FullDate
+        int Year
+        int Month
+    }
+    Dim_FitnessGoal {
+        int GoalKey PK
+        string GoalName
+    }
+    Dim_FitnessType {
+        int TypeKey PK
+        string TypeName
+    }
+    Dim_FoodItem {
+        int FoodKey PK
+        string FoodName
+        decimal Calories
+    }
+    Dim_WorkoutType {
+        int WorkoutTypeKey PK
+        string WorkoutName
+    }
+    Dim_MetricType {
+        int MetricTypeKey PK
+        string MetricName
+    }
+    Dim_MealType {
+        int MealTypeKey PK
+        string MealName
+    }
+
+    %% --- Snowflake Dimensions ---
+    Dim_HealthCondition {
+        int ConditionKey PK
+        string ConditionName
+    }
+    Dim_Exercise {
+        int ExerciseKey PK
+        string ExerciseName
+    }
+    Dim_Diet {
+        int DietKey PK
+        string DietName
+    }
+
+    %% --- Bridge Tables ---
+    
+    Bridge_User_HealthCondition {
+        int UserKey FK
+        int ConditionKey FK
+    }
+    Bridge_User_WorkoutPreference {
+        int UserKey FK
+        int ExerciseKey FK
+    }
+    Bridge_User_DietPreference {
+        int UserKey FK
+        int DietKey FK
+    }
+
+    %% --- Relationships ---
+    Fact_UserSnapshot }|--|| Dim_User : "links to"
+    Fact_UserSnapshot }|--|| Dim_FitnessGoal : "links to"
+    Fact_UserSnapshot }|--|| Dim_FitnessType : "links to"
+
+    Fact_WorkoutSession }|--|| Dim_User : "belongs to"
+    Fact_WorkoutSession }|--|| Dim_Date : "occurred on"
+    Fact_WorkoutSession }|--|| Dim_WorkoutType : "is a"
+
+    Fact_HealthMetric }|--|| Dim_User : "belongs to"
+    Fact_HealthMetric }|--|| Dim_Date : "measured on"
+    Fact_HealthMetric }|--|| Dim_MetricType : "is a"
+
+    Fact_NutritionLog }|--|| Dim_User : "belongs to"
+    Fact_NutritionLog }|--|| Dim_Date : "logged on"
+    Fact_NutritionLog }|--|| Dim_FoodItem : "of food"
+    Fact_NutritionLog }|--|| Dim_MealType : "for meal"
+
+    Dim_User ||--o{ Bridge_User_HealthCondition : "has"
+    Dim_HealthCondition ||--o{ Bridge_User_HealthCondition : "applies to"
+
+    Dim_User ||--o{ Bridge_User_WorkoutPreference : "prefers"
+    Dim_Exercise ||--o{ Bridge_User_WorkoutPreference : "is"
+
+    Dim_User ||--o{ Bridge_User_DietPreference : "prefers"
+    Dim_Diet ||--o{ Bridge_User_DietPreference : "is"
+```
