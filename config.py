@@ -1,5 +1,6 @@
 """
 Configuration settings
+- db credentials, file paths
 - edit with my mysql credentials 
 """
 
@@ -19,9 +20,9 @@ DATABASE_CONFIG = {
 DATA_PATHS = {
     'base_path': Path('./data'),
     'fitbit_path': Path('./data/fitbit'),
-    'gym_members_file': Path('./data/gym_members_exercise_dataset.csv'),
-    'mendeley_file': Path('./data/mendeley_health_fitness.csv'),
-    'nutrition_file': Path('./data/nutrition_dataset.json'),
+    'gym_members_file': Path('./data/gym_members_exercise_tracking.csv'),
+    'mendeley_file': Path('./data/gym_recommendation.xlsx'),
+    'nutrition_file': Path('./data/nutrition_dataset.xlsx'),
     'output_path': Path('./output')
 }
 

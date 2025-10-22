@@ -31,7 +31,7 @@ This repository contains the initial implementation focusing on data integration
 ### ETL Pipeline Components
 
 1. **Extract**: read the raw data
-2. **Transform** the data into the Snowflake schema
+2. **Transform** the data into the star schema
    - Unifying users
    - Parsing text blobs into keys
    - Creating fact and dimension dataframes
@@ -39,7 +39,7 @@ This repository contains the initial implementation focusing on data integration
 
 ### Database Schema
 
-This project builds an **Online Analytical Processing (OLAP)** data warehouse using a **Snowflake Schema**.
+This project builds an **Online Analytical Processing (OLAP)** data warehouse using a **snowflake schema**.
 
 This model is optimized for high-speed, complex `GROUP BY` and `JOIN` queries essential for analytics and machine learning.
 - **Fact Tables (Green)**: Store the "measures" or numbers (e.g., Weight, CaloriesBurned).

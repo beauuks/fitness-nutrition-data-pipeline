@@ -1,5 +1,6 @@
 -- OLAP data warehouse
 -- for analytical query (not transaction)
+-- using snowflake schema
 
 -- Create database 
 -- CREATE DATABASE fitness_nutrition_dw CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

@@ -31,9 +31,9 @@ class FitnessNutritionETL:
     
     def __init__(self, config):
         self.config = config
-        self.data_sources = {}
+        self.data_sources = {} # empty dict to hold raw df's.
         self.staging_data = {}
-        self.warehouse_data = {} # This will hold the final Dim/Fact DataFrames
+        self.warehouse_data = {} # holds the final Dim/Fact df's
         self.engine = None
         self.user_mapping = {}
         
@@ -55,7 +55,7 @@ class FitnessNutritionETL:
 
     # EXTRACT 
     def extract_fitbit_data(self):
-        """Extract and process Fitbit datasets."""
+        """Extract Fitbit datasets"""
         logger.info("Starting Fitbit data extraction...")
         fitbit_files = {
             'daily_activity': 'dailyActivity_merged.csv',
@@ -83,7 +83,7 @@ class FitnessNutritionETL:
         logger.info("Fitbit data extraction complete.")
 
     def extract_gym_members_data(self):
-        """Extract and process gym members dataset."""
+        """Extract gym members dataset"""
         logger.info("Starting gym members data extraction...")
         try:
             filepath = self.config['DATA_PATHS']['gym_members_file']
@@ -97,32 +97,28 @@ class FitnessNutritionETL:
             logger.error(f"Error processing gym members data: {e}")
 
     def extract_mendeley_health_data(self):
-        """Extract and process Mendeley health dataset."""
+        """Extract Mendeley health dataset"""
         logger.info("Starting Mendeley health data extraction...")
         try:
             filepath = self.config['DATA_PATHS']['mendeley_file']
             if not filepath.exists():
                 logger.warning(f"File not found: {filepath}, skipping...")
                 return
-            # Note: Your original code said .xlsx but file path was .csv
-            # Assuming CSV based on your config file name.
-            df = pd.read_csv(filepath) 
+            df = pd.read_excel(filepath) 
             self.data_sources['mendeley_health'] = df
             logger.info(f"Extracted Mendeley health data: {len(df)} records")
         except Exception as e:
             logger.error(f"Error processing Mendeley health data: {e}")
 
     def extract_nutrition_data(self):
-        """Extract and process nutrition JSON dataset."""
+        """Extract nutrition dataset"""
         logger.info("Starting nutrition data extraction...")
         try:
             filepath = self.config['DATA_PATHS']['nutrition_file']
             if not filepath.exists():
                 logger.warning(f"File not found: {filepath}, skipping...")
                 return
-            with open(filepath, 'r') as f:
-                nutrition_data = json.load(f)
-            df = pd.DataFrame(nutrition_data)
+            df = pd.read_excel(filepath)
             self.data_sources['nutrition'] = df
             logger.info(f"Extracted nutrition data: {len(df)} records")
         except Exception as e:
@@ -130,7 +126,7 @@ class FitnessNutritionETL:
 
     # TRANSFORM 
     def _clean_text_list(self, text):
-        """Helper to split comma-separated strings into a clean list."""
+        """Helper to split comma-separated strings into a clean list"""
         if not isinstance(text, str):
             return []
         # Remove "and", split by comma or newline, strip whitespace, remove empty
@@ -162,7 +158,7 @@ class FitnessNutritionETL:
         logger.info("Data transformation into Snowflake Schema completed.")
 
     def _create_user_mapping(self):
-        """Create unified user mapping across datasets."""
+        """Create unified user mapping across datasets"""
         logger.info("Creating user mapping...")
         next_user_id = 1
         
@@ -204,7 +200,7 @@ class FitnessNutritionETL:
         return 'maintain_health'
 
     def _create_staging_data(self):
-        """Integrate sources into a single staging DataFrame for users."""
+        """Integrate sources into a single staging DataFrame for users"""
         logger.info("Creating staging data...")
         self._create_user_mapping()
         user_profiles_staging = []
@@ -478,12 +474,13 @@ class FitnessNutritionETL:
                     workout_sessions.append({
                         'UserKey': user_key, 'DateKey': date_key,
                         'WorkoutTypeKey': self.workout_type_lookup.get('mixed'), # Default
+                        # store both hours and minutes for easier analytics --> calculate once for difference uses.
                         'DurationHours': (row['VeryActiveMinutes'] + row['FairlyActiveMinutes']) / 60,
+                        'ActiveMinutes': row['VeryActiveMinutes'] + row['FairlyActiveMinutes'], 
                         'CaloriesBurned': row['Calories'],
                         'TotalSteps': row['TotalSteps'],
                         'TotalDistance': row['TotalDistance'],
-                        'ActiveMinutes': row['VeryActiveMinutes'] + row['FairlyActiveMinutes'],
-                        'FrequencyPerWeek': None # This would be calculated in analysis, not ETL
+                        'FrequencyPerWeek': None # This would be calculated in analysis, not ETL (we can't know it with data from only one day)
                     })
         
         self.warehouse_data['Fact_HealthMetric'] = pd.DataFrame(health_metrics)
