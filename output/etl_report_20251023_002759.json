@@ -1,0 +1,17 @@
+{
+  "etl_timestamp": "2025-10-23T00:27:59.298170",
+  "data_sources_processed": [
+    "fitbit",
+    "gym_members",
+    "mendeley_health",
+    "nutrition"
+  ],
+  "total_users_mapped": 15597,
+  "validation_results": {
+    "Dim_User_count": 15597,
+    "Fact_UserSnapshot_count": 15597,
+    "Fact_WorkoutSession_count": 0,
+    "Fact_HealthMetric_count": 0,
+    "bridge_healthcondition_count": 13502
+  }
+}

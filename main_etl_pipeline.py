@@ -158,12 +158,15 @@ class FitnessNutritionETL:
         logger.info("Data transformation into Snowflake Schema completed.")
 
     def _create_user_mapping(self):
-        """Create unified user mapping across datasets"""
+        """Create unified user mapping across datasets
+           -> still need better user mapping logic
+        """
         logger.info("Creating user mapping...")
         next_user_id = 1
         
         # Note: This is a simple UNION of users, not true entity resolution.
         # It assumes every row from every source is a unique user profile.
+        # -> need to fix that
         
         if 'fitbit' in self.data_sources:
             fitbit_users = set()
@@ -209,8 +212,20 @@ class FitnessNutritionETL:
         if 'mendeley_health' in self.data_sources:
             df = self.data_sources['mendeley_health'].copy()
             df.columns = df.columns.str.lower().str.replace(' ', '_')
+            
             for idx, row in df.iterrows():
                 user_key = self.user_mapping.get(f"mendeley_{idx}")
+                if not user_key:
+                    logger.warning(f"Mendeley user index {idx} not found in mapping. Skipping.")
+                    continue
+
+                conditions = []
+                if str(row.get('hypertension')).lower() == 'yes':
+                    conditions.append('hypertension')
+                if str(row.get('diabetes')).lower() == 'yes':
+                    conditions.append('diabetes')
+                health_conditions_text = ', '.join(conditions) if conditions else None
+                
                 profile = {
                     'UserKey': user_key,
                     'Source': 'mendeley',
@@ -220,11 +235,11 @@ class FitnessNutritionETL:
                     'Weight': row.get('weight'),
                     'Height': row.get('height'),
                     'BMI': row.get('bmi'),
-                    'HealthConditions': row.get('health_conditions'), # TEXT Blob
+                    'HealthConditions': health_conditions_text, # TEXT Blob
                     'FitnessGoal': self._standardize_fitness_goal(row.get('fitness_goals')),
                     'FitnessType': row.get('fitness_type'),
-                    'WorkoutPreference': row.get('workout'), # TEXT Blob
-                    'DietPreference': row.get('diet_nutritions'), # TEXT Blob
+                    'WorkoutPreference': row.get('exercise'), # TEXT Blob
+                    'DietPreference': row.get('diet'), # TEXT Blob
                     'ExperienceLevel': None,
                     'ActivityLevel': None
                 }
@@ -322,8 +337,59 @@ class FitnessNutritionETL:
         # Dim_FoodItem
         if 'nutrition' in self.data_sources:
             df = self.data_sources['nutrition'].copy()
-            df = df.rename(columns={'name': 'FoodName', 'category': 'FoodCategory'})
+            df = df.rename(columns={'name': 'FoodName', 'category': 'FoodCategory'}) # Rename first
+
+            # --- PASTE THE CLEANING CODE HERE ---
+            logger.info("Cleaning numeric nutrient columns in nutrition data...")
+            numeric_nutrient_columns = [
+                'calories', 'total_fat', 'saturated_fat', 'cholesterol', 'sodium',
+                'choline', 'folate', 'folic_acid', 'niacin', 'pantothenic_acid',
+                'riboflavin', 'thiamin', 'vitamin_a', 'vitamin_a_rae', 'carotene_alpha',
+                'carotene_beta', 'cryptoxanthin_beta', 'lutein_zeaxanthin', 'lucopene',
+                'vitamin_b12', 'vitamin_b6', 'vitamin_c', 'vitamin_d', 'vitamin_e',
+                'tocopherol_alpha', 'vitamin_k', 'calcium', 'copper', 'iron', 'magnesium',
+                'manganese', 'phosphorous', 'potassium', 'selenium', 'zink', 'protein',
+                # Add amino acids if needed
+                'alanine', 'arginine', 'aspartic_acid', 'cystine', 'glutamic_acid',
+                'glycine', 'histidine', 'hydroxyproline', 'isoleucine', 'leucine',
+                'lysine', 'methionine', 'phenylalanine', 'proline', 'serine',
+                'threonine', 'tryptophan', 'tyrosine', 'valine',
+                'carbohydrate', 'fiber', 'sugars', 'fructose', 'galactose', 'glucose',
+                'lactose', 'maltose', 'sucrose',
+                # Add fats if needed
+                'saturated_fatty_acids', 'monounsaturated_fatty_acids',
+                'polyunsaturated_fatty_acids', 'fatty_acids_total_trans',
+                'alcohol', 'ash', 'caffeine', 'theobromin', 'water'
+            ]
+
+            # Regex to match common units at the end (case-insensitive)
+            # Handles g, mg, mcg, iu, kcal (for calories maybe), etc.
+            unit_regex = r'\s*(g|mg|mcg|iu|kcal)$'
+
+            for col in numeric_nutrient_columns:
+                if col in df.columns:
+                    # Only process if it's currently a string column
+                    if df[col].dtype == 'object':
+                        # Remove units and extra whitespace
+                        df[col] = df[col].astype(str).str.replace(unit_regex, '', regex=True, case=False).str.strip()
+                        # Convert to numeric, errors become NaN (-> NULL)
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    elif pd.api.types.is_numeric_dtype(df[col]):
+                         pass # Already numeric, do nothing
+                    else:
+                         # Log unexpected types and attempt conversion
+                         logger.warning(f"Unexpected dtype '{df[col].dtype}' for nutrient column '{col}'. Attempting numeric conversion.")
+                         df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Ensure 'serving_size_grams' is also numeric if you use it later
+            if 'serving_size_grams' in df.columns:
+                 df['serving_size_grams'] = pd.to_numeric(df['serving_size_grams'], errors='coerce')
+
+            logger.info("Nutrient column cleaning complete.")
+
             cols = ['FoodName', 'FoodCategory', 'calories', 'protein', 'carbs', 'fats', 'fiber']
+            available_cols = [c for c in cols if c in df.columns]
+            df = df[available_cols]
             df = df[[c for c in cols if c in df.columns]].dropna(subset=['FoodName']).drop_duplicates(subset=['FoodName'])
             df = df.reset_index(drop=True)
             df.index.name = 'FoodKey'
@@ -507,13 +573,21 @@ class FitnessNutritionETL:
             statements = [stmt.strip() for stmt in schema_sql.split(';') if stmt.strip()]
             
             with self.engine.connect() as connection:
+
+                # turn off foreign key check to avoid error when running DROP TABLE IF EXISTS
+                connection.execute(text("SET FOREIGN_KEY_CHECKS=0;"))
+
                 for statement in statements:
                     if statement:
                         # Skip comments
                         if statement.startswith('--'):
                             continue
                         connection.execute(text(statement))
+
+                connection.execute(text("SET FOREIGN_KEY_CHECKS=1;")) # turn FK check back on
+
                 connection.commit()
+
             logger.info("Data Warehouse schema created successfully")
         except Exception as e:
             logger.error(f"Error creating MySQL database schema: {e}")
