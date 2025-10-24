@@ -158,38 +158,152 @@ class FitnessNutritionETL:
         logger.info("Data transformation into Snowflake Schema completed.")
 
     def _create_user_mapping(self):
-        """Create unified user mapping across datasets
-           -> still need better user mapping logic
+        """
+        Create unified user mapping using probabilistic matching
+        for anonymous datasets (Mendeley, Gym) and a separate
+        mapping for ID-based datasets (Fitbit).
         """
         logger.info("Creating user mapping...")
+        
+        self.user_mapping = {}
+        self.staging_profiles = [] # A temporary list to hold master profiles
+        profile_hash_map = {} # Stores {profile_hash: UserKey}
         next_user_id = 1
         
-        # Note: This is a simple UNION of users, not true entity resolution.
-        # It assumes every row from every source is a unique user profile.
-        # -> need to fix that
-        
+        # --- Pass 1: Anchor on Mendeley (richest profile data) ---
+        if 'mendeley_health' in self.data_sources:
+            df = self.data_sources['mendeley_health'].copy()
+            df.columns = df.columns.str.lower().str.replace(' ', '_')
+            
+            for idx, row in df.iterrows():
+                try:
+                    # Standardize data for hashing
+                    age = int(row.get('age'))
+                    gender = str(row.get('sex')).lower()
+                    height_m = round(float(row.get('height')) / 100, 2) # Assuming cm
+                    weight_kg = round(float(row.get('weight')), 1)
+                    
+                    profile_hash = f"{age}_{gender}_{height_m}_{weight_kg}"
+                    
+                    if profile_hash not in profile_hash_map:
+                        # New user
+                        user_key = next_user_id
+                        profile_hash_map[profile_hash] = user_key
+                        next_user_id += 1
+
+                        conditions = []
+                        if str(row.get('hypertension')).lower() == 'yes':
+                            conditions.append('hypertension')
+                        if str(row.get('diabetes')).lower() == 'yes':
+                            conditions.append('diabetes')
+                        health_conditions_text = ', '.join(conditions) if conditions else None
+                        
+                        # Create the master profile
+                        profile_data = {
+                            'UserKey': user_key,
+                            'Source': 'mendeley',
+                            'OriginalID': idx,
+                            'Age': age,
+                            'Gender': gender,
+                            'Weight': weight_kg,
+                            'Height': height_m,
+                            'BMI': row.get('bmi'),
+                            'HealthConditions': health_conditions_text, 
+                            'FitnessGoal': self._standardize_fitness_goal(row.get('fitness_goals')),
+                            'FitnessType': row.get('fitness_type'),
+                            'WorkoutPreference': row.get('exercise'),
+                            'DietPreference': row.get('diet'),
+                            'ExperienceLevel': None,
+                            'ActivityLevel': None
+                        }
+                        self.staging_profiles.append(profile_data)
+                    else:
+                        # This is a duplicate *within* the Mendeley file
+                        user_key = profile_hash_map[profile_hash]
+                    
+                    self.user_mapping[f"mendeley_{idx}"] = user_key
+                
+                except Exception as e:
+                    logger.warning(f"Could not parse Mendeley row {idx}: {e}")
+
+        # --- Pass 2: Link Gym Members ---
+        if 'gym_members' in self.data_sources:
+            df = self.data_sources['gym_members'].copy()
+            df.columns = df.columns.str.lower().str.replace(' ', '_')
+            
+            for idx, row in df.iterrows():
+                try:
+                    # Standardize data for hashing
+                    age = int(row.get('age'))
+                    gender = str(row.get('gender')).lower()
+                    height_m = round(float(row.get('height_(m)')), 2) # Check col name
+                    weight_kg = round(float(row.get('weight_(kg)')), 1) # Check col name
+                    
+                    profile_hash = f"{age}_{gender}_{height_m}_{weight_kg}"
+                    
+                    if profile_hash in profile_hash_map:
+                        # --- MATCH FOUND ---
+                        # Link this gym row to the existing Mendeley user
+                        user_key = profile_hash_map[profile_hash]
+                        self.user_mapping[f"gym_{idx}"] = user_key
+                        
+                        # (Optional) Enrich the existing profile
+                        # e.g., Find profile in self.staging_profiles and fill missing values
+                        
+                    else:
+                        # --- NO MATCH: New User ---
+                        user_key = next_user_id
+                        profile_hash_map[profile_hash] = user_key
+                        next_user_id += 1
+                        
+                        profile_data = {
+                            'UserKey': user_key,
+                            'Source': 'gym',
+                            'OriginalID': idx,
+                            'Age': age,
+                            'Gender': gender,
+                            'Weight': weight_kg,
+                            'Height': height_m,
+                            'BMI': row.get('bmi'),
+                            'HealthConditions': None,
+                            'FitnessGoal': self._standardize_fitness_goal(row.get('workout_type')),
+                            'FitnessType': row.get('workout_type'),
+                            'WorkoutPreference': row.get('workout_type'),
+                            'DietPreference': None,
+                            'ExperienceLevel': row.get('experience_level'),
+                            'ActivityLevel': None
+                        }
+                        self.staging_profiles.append(profile_data)
+                        
+                    self.user_mapping[f"gym_{idx}"] = user_key
+
+                except Exception as e:
+                    logger.warning(f"Could not parse Gym Member row {idx}: {e}")
+
+        # --- Pass 3: Add Fitbit Users (Unlinkable) ---
         if 'fitbit' in self.data_sources:
             fitbit_users = set()
             for dataset in self.data_sources['fitbit'].values():
                 if 'Id' in dataset.columns:
                     fitbit_users.update(dataset['Id'].unique())
+            
             for user_id in fitbit_users:
-                self.user_mapping[f"fitbit_{user_id}"] = next_user_id
-                next_user_id += 1
-        
-        if 'gym_members' in self.data_sources:
-            gym_df = self.data_sources['gym_members']
-            for idx in gym_df.index:
-                self.user_mapping[f"gym_{idx}"] = next_user_id
+                user_key = next_user_id
+                self.user_mapping[f"fitbit_{user_id}"] = user_key
                 next_user_id += 1
                 
-        if 'mendeley_health' in self.data_sources:
-            mendeley_df = self.data_sources['mendeley_health']
-            for idx in mendeley_df.index:
-                self.user_mapping[f"mendeley_{idx}"] = next_user_id
-                next_user_id += 1
+                # Create a "shell" profile for the Fitbit user
+                profile_data = {
+                    'UserKey': user_key,
+                    'Source': 'fitbit',
+                    'OriginalID': user_id,
+                    'Age': None, 'Gender': None, 'Weight': None, 'Height': None, 'BMI': None,
+                    'HealthConditions': None, 'FitnessGoal': 'maintain_health', 'FitnessType': None,
+                    'WorkoutPreference': None, 'DietPreference': None, 'ExperienceLevel': None, 'ActivityLevel': None
+                }
+                self.staging_profiles.append(profile_data)
                 
-        logger.info(f"Created user mapping for {len(self.user_mapping)} total user entries")
+        logger.info(f"Created user mapping for {len(self.staging_profiles)} unique users")
 
     def _standardize_fitness_goal(self, goal_text):
         """Standardize fitness goals using config mapping."""
@@ -203,95 +317,29 @@ class FitnessNutritionETL:
         return 'maintain_health'
 
     def _create_staging_data(self):
-        """Integrate sources into a single staging DataFrame for users"""
+        """
+        Converts the processed staging_profiles list  into the final staging DataFrame
+        """
         logger.info("Creating staging data...")
-        self._create_user_mapping()
-        user_profiles_staging = []
         
-        # Process Mendeley data (richest source for preferences)
-        if 'mendeley_health' in self.data_sources:
-            df = self.data_sources['mendeley_health'].copy()
-            df.columns = df.columns.str.lower().str.replace(' ', '_')
-            
-            for idx, row in df.iterrows():
-                user_key = self.user_mapping.get(f"mendeley_{idx}")
-                if not user_key:
-                    logger.warning(f"Mendeley user index {idx} not found in mapping. Skipping.")
-                    continue
+        # create the user mapping
+        self._create_user_mapping() 
+        
+        # convert the list of profile into a staging df
+        if not self.staging_profiles:
+            logger.warning("No user profiles were created. Staging will be empty.")
+            self.staging_data['user_profiles'] = pd.DataFrame()
+            return
 
-                conditions = []
-                if str(row.get('hypertension')).lower() == 'yes':
-                    conditions.append('hypertension')
-                if str(row.get('diabetes')).lower() == 'yes':
-                    conditions.append('diabetes')
-                health_conditions_text = ', '.join(conditions) if conditions else None
-                
-                profile = {
-                    'UserKey': user_key,
-                    'Source': 'mendeley',
-                    'OriginalID': idx,
-                    'Age': row.get('age'),
-                    'Gender': row.get('sex'),
-                    'Weight': row.get('weight'),
-                    'Height': row.get('height'),
-                    'BMI': row.get('bmi'),
-                    'HealthConditions': health_conditions_text, # TEXT Blob
-                    'FitnessGoal': self._standardize_fitness_goal(row.get('fitness_goals')),
-                    'FitnessType': row.get('fitness_type'),
-                    'WorkoutPreference': row.get('exercise'), # TEXT Blob
-                    'DietPreference': row.get('diet'), # TEXT Blob
-                    'ExperienceLevel': None,
-                    'ActivityLevel': None
-                }
-                user_profiles_staging.append(profile)
-
-        # Process Gym Members data
-        if 'gym_members' in self.data_sources:
-            df = self.data_sources['gym_members'].copy()
-            df.columns = df.columns.str.lower().str.replace(' ', '_')
-            for idx, row in df.iterrows():
-                user_key = self.user_mapping.get(f"gym_{idx}")
-                profile = {
-                    'UserKey': user_key,
-                    'Source': 'gym',
-                    'OriginalID': idx,
-                    'Age': row.get('age'),
-                    'Gender': row.get('gender'),
-                    'Weight': row.get('weight_kg'),
-                    'Height': row.get('height_m'),
-                    'BMI': row.get('bmi'),
-                    'HealthConditions': None,
-                    'FitnessGoal': self._standardize_fitness_goal(row.get('workout_type')),
-                    'FitnessType': row.get('workout_type'),
-                    'WorkoutPreference': row.get('workout_type'),
-                    'DietPreference': None,
-                    'ExperienceLevel': row.get('experience_level'),
-                    'ActivityLevel': None
-                }
-                user_profiles_staging.append(profile)
-
-        # Process Fitbit data
-        if 'fitbit' in self.data_sources:
-            # We'll just create user shells from fitbit.
-            # Facts (weight, sleep) will be loaded into fact tables.
-            fitbit_user_keys = {k: v for k, v in self.user_mapping.items() if k.startswith('fitbit_')}
-            for key, user_key in fitbit_user_keys.items():
-                original_id = key.replace('fitbit_', '')
-                profile = {
-                    'UserKey': user_key,
-                    'Source': 'fitbit',
-                    'OriginalID': original_id,
-                    'Age': None, 'Gender': None, 'Weight': None, 'Height': None, 'BMI': None,
-                    'HealthConditions': None, 'FitnessGoal': 'maintain_health', 'FitnessType': None,
-                    'WorkoutPreference': None, 'DietPreference': None, 'ExperienceLevel': None, 'ActivityLevel': None
-                }
-                user_profiles_staging.append(profile)
-
-        self.staging_data['user_profiles'] = pd.DataFrame(user_profiles_staging).set_index('UserKey')
+        self.staging_data['user_profiles'] = pd.DataFrame(self.staging_profiles)
+        
+        # set the UserKey as the index 
+        self.staging_data['user_profiles'] = self.staging_data['user_profiles'].set_index('UserKey')
+        
         logger.info(f"Staging user profiles created: {len(self.staging_data['user_profiles'])} records")
 
-    def _create_dim_date(self, start='2020-01-01', end='2025-12-31'):
-        """Create a master date dimension table."""
+    def _create_dim_date(self, start='2016-01-01', end='2025-12-31'):
+        """Create a master date dimension table"""
         logger.info("Creating Dim_Date...")
         df = pd.DataFrame({'FullDate': pd.date_range(start, end)})
         df['DateKey'] = df['FullDate'].dt.strftime('%Y%m%d').astype(int)
@@ -339,7 +387,6 @@ class FitnessNutritionETL:
             df = self.data_sources['nutrition'].copy()
             df = df.rename(columns={'name': 'FoodName', 'category': 'FoodCategory'}) # Rename first
 
-            # --- PASTE THE CLEANING CODE HERE ---
             logger.info("Cleaning numeric nutrient columns in nutrition data...")
             numeric_nutrient_columns = [
                 'calories', 'total_fat', 'saturated_fat', 'cholesterol', 'sodium',
