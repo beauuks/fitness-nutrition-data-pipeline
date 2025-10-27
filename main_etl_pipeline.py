@@ -786,7 +786,7 @@ class FitnessNutritionETL:
         try:
             with self.engine.connect() as connection:
                 # Check record counts
-                tables = ['Dim_User', 'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric']
+                tables = ['Dim_User', 'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric', 'Fact_NutritionLog']
                 for table in tables:
                     result = connection.execute(text(f"SELECT COUNT(*) FROM {table.lower()}"))
                     count = result.fetchone()[0]
