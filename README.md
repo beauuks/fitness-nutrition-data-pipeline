@@ -41,10 +41,10 @@ This repository contains the initial implementation focusing on data integration
 
 This project builds an **Online Analytical Processing (OLAP)** data warehouse using a **snowflake schema**.
 
-This model is optimized for high-speed, complex `GROUP BY` and `JOIN` queries essential for analytics and machine learning.
-- **Fact Tables (Green)**: Store the "measures" or numbers (e.g., Weight, CaloriesBurned).
-- **Dimension Tables (Blue)**: Store the "context" or categories (e.g., UserName, ExerciseName).
-- **Bridge Tables (Yellow)**: Connect dimensions with many-to-many relationships (e.g., a User can have many Health Conditions).
+This model is optimized for high-speed, complex `GROUP BY` and `JOIN` queries essential for analytics.
+- **Fact Tables**: Store the measures or numbers.
+- **Dimension Tables**: Store the context or categories.
+- **Bridge Tables**: Connect dimensions with many-to-many relationships (e.g., a User can have many Health Conditions).
 
 ```mermaid
 erDiagram
@@ -79,9 +79,13 @@ erDiagram
         int LogKey PK
         int UserKey FK
         int DateKey FK
-        int FoodKey FK
         int MealTypeKey FK
-        decimal ServingAmount
+        int FoodKey FK
+        decimal ServingSize
+        decimal TotalCalories
+        decimal TotalProtein
+        decimal TotalCarbs
+        decimal TotalFats
     }
 
     %% --- Dimensions ---
