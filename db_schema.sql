@@ -190,18 +190,22 @@ CREATE TABLE Fact_HealthMetric (
 ) COMMENT='Time-series health data (sleep, heart rate, etc.)';
 
 -- Fact: Nutrition Log (Grain: One row per food log entry);
-CREATE TABLE Fact_NutritionLog (
-    LogKey INT PRIMARY KEY AUTO_INCREMENT,
+CREATE TABLE IF NOT EXISTS fact_nutritionlog (
+    LogKey INT AUTO_INCREMENT PRIMARY KEY,
     UserKey INT NOT NULL,
     DateKey INT NOT NULL,
-    FoodKey INT NOT NULL,
     MealTypeKey INT NOT NULL,
-    ServingAmount DECIMAL(6,2),
-    FOREIGN KEY (UserKey) REFERENCES Dim_User(UserKey),
-    FOREIGN KEY (DateKey) REFERENCES Dim_Date(DateKey),
-    FOREIGN KEY (FoodKey) REFERENCES Dim_FoodItem(FoodKey),
-    FOREIGN KEY (MealTypeKey) REFERENCES Dim_MealType(MealTypeKey)
-) COMMENT='User food consumption logs';
+    FoodKey INT NOT NULL,
+    ServingSize DECIMAL(5,2),
+    TotalCalories DECIMAL(8,2),
+    TotalProtein DECIMAL(6,2),
+    TotalCarbs DECIMAL(6,2),
+    TotalFats DECIMAL(6,2),
+    FOREIGN KEY (UserKey) REFERENCES dim_user(UserKey),
+    FOREIGN KEY (DateKey) REFERENCES dim_date(DateKey),
+    FOREIGN KEY (MealTypeKey) REFERENCES dim_mealtype(MealTypeKey),
+    FOREIGN KEY (FoodKey) REFERENCES dim_fooditem(FoodKey)
+)COMMENT='User food consumption logs';
 
 -- Create Indexes for performance;
 CREATE INDEX idx_fact_workout_user ON Fact_WorkoutSession(UserKey);

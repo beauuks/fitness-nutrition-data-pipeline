@@ -520,6 +520,9 @@ class FitnessNutritionETL:
         # Fact_HealthMetric & Fact_WorkoutSession
         self._create_facts_from_fitbit()
 
+        # Fact_NutritionLog
+        self._create_fact_nutrition_log()
+
     def _create_facts_from_fitbit(self):
         """Parse fitbit data into Fact_HealthMetric and Fact_WorkoutSession."""
         if 'fitbit' not in self.data_sources:
@@ -601,6 +604,96 @@ class FitnessNutritionETL:
         logger.info(f"Created Fact_HealthMetric: {len(self.warehouse_data['Fact_HealthMetric'])} records")
         logger.info(f"Created Fact_WorkoutSession: {len(self.warehouse_data['Fact_WorkoutSession'])} records")
 
+    def _create_fact_nutrition_log(self):
+        """Create Fact_NutritionLog from available data or generate sample logs"""
+        logger.info("Creating Fact_NutritionLog...")
+        
+        # Check if we have food items dimension
+        if 'Dim_FoodItem' not in self.warehouse_data or self.warehouse_data['Dim_FoodItem'].empty:
+            logger.warning("No food items available. Skipping Fact_NutritionLog creation.")
+            self.warehouse_data['Fact_NutritionLog'] = pd.DataFrame()
+            return
+        
+        # TODO: In a production system, this would extract from actual meal log data
+        # for now we will generate sample data for demonstration since we dont have actual meal logs
+        
+        nutrition_logs = []
+        
+        # Get available users and food items
+        user_keys = self.staging_data['user_profiles'].index.tolist()
+        food_items = self.warehouse_data['Dim_FoodItem']
+        
+        if len(user_keys) == 0 or len(food_items) == 0:
+            logger.warning("No users or food items available for nutrition logs.")
+            self.warehouse_data['Fact_NutritionLog'] = pd.DataFrame()
+            return
+        
+        # Create meal type lookup
+        meal_type_lookup = {
+            'breakfast': 1,
+            'lunch': 2,
+            'dinner': 3,
+            'snack': 4
+        }
+        
+        # Generate sample logs for the first 10 users (or fewer if less available)
+        sample_users = user_keys[:min(10, len(user_keys))]
+        
+        # Get some recent dates (last 30 days)
+        end_date = datetime.now()
+        date_range = pd.date_range(end=end_date, periods=30, freq='D')
+        
+        for user_key in sample_users:
+            # Generate 3-5 random days of logs for this user
+            num_days = np.random.randint(3, 6)
+            selected_dates = np.random.choice(date_range, size=num_days, replace=False)
+            
+            for log_date in selected_dates:
+                date_str = pd.Timestamp(log_date).strftime('%Y-%m-%d')
+                date_key = self.date_lookup_rev.get(date_str)
+                
+                if not date_key:
+                    continue
+                
+                # generate 3-5 meal entries per day
+                num_meals = np.random.randint(3, 6)
+                meal_types = np.random.choice(['breakfast', 'lunch', 'dinner', 'snack'], 
+                                             size=num_meals, replace=True)
+                
+                for meal_type in meal_types:
+                    # random food item
+                    food_key = np.random.choice(food_items.index)
+                    food_row = food_items.loc[food_key]
+                    
+                    # random serving size
+                    serving_size = round(np.random.uniform(0.5, 3.0), 2)
+                    
+                    # calculate totals (handle missing values)
+                    calories = food_row.get('calories', 0) if pd.notna(food_row.get('calories', 0)) else 0
+                    protein = food_row.get('protein', 0) if pd.notna(food_row.get('protein', 0)) else 0
+                    carbs = food_row.get('carbs', 0) if pd.notna(food_row.get('carbs', 0)) else 0
+                    fats = food_row.get('fats', 0) if pd.notna(food_row.get('fats', 0)) else 0
+                    
+                    nutrition_logs.append({
+                        'UserKey': user_key,
+                        'DateKey': date_key,
+                        'MealTypeKey': meal_type_lookup[meal_type],
+                        'FoodKey': food_key,
+                        'ServingSize': serving_size,
+                        'TotalCalories': round(calories * serving_size, 2),
+                        'TotalProtein': round(protein * serving_size, 2),
+                        'TotalCarbs': round(carbs * serving_size, 2),
+                        'TotalFats': round(fats * serving_size, 2)
+                    })
+        
+        if nutrition_logs:
+            self.warehouse_data['Fact_NutritionLog'] = pd.DataFrame(nutrition_logs)
+            logger.info(f"Created Fact_NutritionLog: {len(nutrition_logs)} sample records")
+            logger.info("NOTE: This is sample data. In production, replace with actual meal log extraction.")
+        else:
+            self.warehouse_data['Fact_NutritionLog'] = pd.DataFrame()
+            logger.warning("No nutrition logs were generated.")
+
     # LOAD 
     def create_database_schema(self):
         """
@@ -651,9 +744,8 @@ class FitnessNutritionETL:
             'Dim_MetricType', 'Dim_WorkoutType', 'Dim_MealType',
             'Bridge_User_HealthCondition', 'Bridge_User_WorkoutPreference', 
             'Bridge_User_DietPreference',
-            'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric'
-            # 'Fact_NutritionLog' is missing from transform, so it's skipped
-        ]
+            'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric',
+            'Fact_NutritionLog']
         
         try:
             with self.engine.connect() as connection:
