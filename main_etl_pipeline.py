@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 import warnings
 import re
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -779,47 +780,154 @@ class FitnessNutritionETL:
 
     # VALIDATE & RUN
     def validate_data_quality(self):
-        """Perform data quality validation on the new data warehouse"""
+        """Perform data quality validation on the data warehouse"""
         logger.info("Performing data quality validation...")
-        validation_results = {}
+        validation_results = {
+            'timestamp': datetime.now().isoformat(),
+            'table_counts': {},
+            'issues': [],
+            'warnings': [],
+            'quality_score': 100.0
+        }
         
         try:
-            with self.engine.connect() as connection:
-                # Check record counts
-                tables = ['Dim_User', 'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric', 'Fact_NutritionLog']
+            with self.engine.begin() as connection:
+                # Count records in all tables
+                tables = [
+                    'Dim_User', 'Dim_Date', 'Dim_FoodItem', 'Dim_WorkoutType',
+                    'Dim_MealType', 'Dim_MetricType', 'Dim_HealthCondition',
+                    'Dim_FitnessGoal', 'Dim_FitnessType', 'Dim_Exercise', 'Dim_Diet',
+                    'Fact_UserSnapshot', 'Fact_WorkoutSession', 'Fact_HealthMetric',
+                    'Fact_NutritionLog', 'Bridge_User_HealthCondition',
+                    'Bridge_User_WorkoutPreference', 'Bridge_User_DietPreference'
+                ]
+                
                 for table in tables:
-                    result = connection.execute(text(f"SELECT COUNT(*) FROM {table.lower()}"))
-                    count = result.fetchone()[0]
-                    validation_results[f"{table}_count"] = count
+                    count = connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+                    validation_results['table_counts'][table] = count
                     logger.info(f"{table}: {count} records")
                 
-                # Check that bridges were populated
-                result = connection.execute(text("SELECT COUNT(*) FROM bridge_user_healthcondition"))
-                bridge_count = result.fetchone()[0]
-                validation_results['bridge_healthcondition_count'] = bridge_count
-                logger.info(f"Bridge_User_HealthCondition: {bridge_count} records")
-
+                # Execute validation SQL if it exists
+                validation_sql_path = 'validation.sql'
+                if os.path.exists(validation_sql_path):
+                    logger.info("Running validation.sql...")
+                    
+                    with open(validation_sql_path, 'r') as f:
+                        sql_script = f.read()
+                    
+                    # Parse and execute statements
+                    for statement in self._parse_sql_statements(sql_script):
+                        try:
+                            result = connection.execute(text(statement))
+                            if statement.strip().upper().startswith('SELECT'):
+                                for row in result:
+                                    row_dict = dict(row._mapping)
+                                    self._process_validation_row(row_dict, validation_results)
+                        except Exception as e:
+                            logger.debug(f"Statement failed: {str(e)[:100]}")
+                    
+                    # Check violations table
+                    try:
+                        result = connection.execute(text(
+                            "SELECT rule, violation_count FROM validation_violations WHERE violation_count > 0"
+                        ))
+                        for row in result:
+                            validation_results['issues'].append(f"{row.rule}: {row.violation_count} violations")
+                    except:
+                        pass
+        
         except Exception as e:
-            logger.error(f"Error during data validation: {e}")
+            logger.error(f"Validation error: {e}")
+            validation_results['issues'].append(f"Validation error: {str(e)}")
+            validation_results['quality_score'] = 0
+        
+        # Summary
+        total_records = sum(validation_results['table_counts'].values())
+        passed = len(validation_results['issues']) == 0
+        
+        if validation_results['issues']:
+            logger.error(f"❌ {len(validation_results['issues'])} issues found")
+        elif validation_results['warnings']:
+            logger.warning(f"⚠ {len(validation_results['warnings'])} warnings")
+        else:
+            logger.info("✓ Validation passed")
         
         return validation_results
+    
+    def _parse_sql_statements(self, sql_script):
+        """Parse SQL script into executable statements"""
+        statements = []
+        current = []
+        in_comment = False
+        
+        for line in sql_script.split('\n'):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('--'):
+                continue
+            if '/*' in stripped:
+                in_comment = True
+            if '*/' in stripped:
+                in_comment = False
+                continue
+            if in_comment:
+                continue
+            
+            if stripped.startswith('SET '):
+                statements.append(stripped)
+            else:
+                current.append(line)
+                if ';' in line:
+                    stmt = '\n'.join(current).replace(';', '').strip()
+                    if stmt:
+                        statements.append(stmt)
+                    current = []
+        
+        return statements
+    
+    def _process_validation_row(self, row_dict, validation_results):
+        """Process a validation result row and categorize it"""
+        check_name = row_dict.get('check_name', row_dict.get('rule', ''))
+        
+        # Check for violations
+        violation_count = row_dict.get('violations', row_dict.get('violation_count', 
+                                    row_dict.get('orphan_count', row_dict.get('duplicate_pk', 0))))
+        
+        if violation_count > 0:
+            msg = f"{check_name}: {violation_count}"
+            
+            if any(x in check_name for x in ['PK CHECK', 'ORPHAN', 'NULL VIOL']):
+                validation_results['issues'].append(msg)
+                validation_results['quality_score'] -= 5
+            else:
+                validation_results['warnings'].append(msg)
+                validation_results['quality_score'] -= 1
+        
+        validation_results['quality_score'] = max(0, validation_results['quality_score'])
 
     def generate_summary_report(self, validation_results):
         """Generate summary report for the ETL process"""
         logger.info("Generating summary report...")
+        
         report = {
             'etl_timestamp': datetime.now().isoformat(),
             'data_sources_processed': list(self.data_sources.keys()),
             'total_users_mapped': len(self.user_mapping),
-            'validation_results': validation_results
+            'total_records': sum(validation_results['table_counts'].values()),
+            'table_counts': validation_results['table_counts'],
+            'validation': {
+                'quality_score': validation_results['quality_score'],
+                'issues': validation_results['issues'],
+                'warnings': validation_results['warnings']
+            }
         }
         
+        # Save JSON report
         report_path = self.config['DATA_PATHS']['output_path'] / f"etl_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
         
-        logger.info(f"Summary report saved to {report_path}")
+        logger.info(f"Report saved to {report_path}")
+        logger.info(f"ETL Complete | Records: {report['total_records']:,} | Score: {report['validation']['quality_score']:.1f}/100")
 
     def run_full_etl_pipeline(self):
         """Execute the complete ETL pipeline."""
