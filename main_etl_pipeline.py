@@ -171,7 +171,7 @@ class FitnessNutritionETL:
         profile_hash_map = {} # Stores {profile_hash: UserKey}
         next_user_id = 1
         
-        # --- Pass 1: Anchor on Mendeley (richest profile data) ---
+        # mendeley (richest data)
         if 'mendeley_health' in self.data_sources:
             df = self.data_sources['mendeley_health'].copy()
             df.columns = df.columns.str.lower().str.replace(' ', '_')
@@ -181,7 +181,7 @@ class FitnessNutritionETL:
                     # Standardize data for hashing
                     age = int(row.get('age'))
                     gender = str(row.get('sex')).lower()
-                    height_m = round(float(row.get('height')) / 100, 2) # Assuming cm
+                    height_m = round(float(row.get('height')), 2)
                     weight_kg = round(float(row.get('weight')), 1)
                     
                     profile_hash = f"{age}_{gender}_{height_m}_{weight_kg}"
@@ -198,6 +198,14 @@ class FitnessNutritionETL:
                         if str(row.get('diabetes')).lower() == 'yes':
                             conditions.append('diabetes')
                         health_conditions_text = ', '.join(conditions) if conditions else None
+
+                        try:
+                            bmi = float(row.get('bmi'))
+                            if not (10 < bmi < 60): # Define a reasonable range
+                                logger.warning(f"Invalid BMI {bmi} for {idx}. Setting to NULL.")
+                                bmi = np.nan # Will be stored as NULL in SQL
+                        except (ValueError, TypeError):
+                            bmi = np.nan # Handle non-numeric values
                         
                         # Create the master profile
                         profile_data = {
@@ -208,7 +216,7 @@ class FitnessNutritionETL:
                             'Gender': gender,
                             'Weight': weight_kg,
                             'Height': height_m,
-                            'BMI': row.get('bmi'),
+                            'BMI': bmi,
                             'HealthConditions': health_conditions_text, 
                             'FitnessGoal': self._standardize_fitness_goal(row.get('fitness_goals')),
                             'FitnessType': row.get('fitness_type'),
@@ -227,7 +235,7 @@ class FitnessNutritionETL:
                 except Exception as e:
                     logger.warning(f"Could not parse Mendeley row {idx}: {e}")
 
-        # --- Pass 2: Link Gym Members ---
+        # like gym member dataset
         if 'gym_members' in self.data_sources:
             df = self.data_sources['gym_members'].copy()
             df.columns = df.columns.str.lower().str.replace(' ', '_')
@@ -243,16 +251,13 @@ class FitnessNutritionETL:
                     profile_hash = f"{age}_{gender}_{height_m}_{weight_kg}"
                     
                     if profile_hash in profile_hash_map:
-                        # --- MATCH FOUND ---
+                        # MATCH FOUND 
                         # Link this gym row to the existing Mendeley user
                         user_key = profile_hash_map[profile_hash]
-                        self.user_mapping[f"gym_{idx}"] = user_key
-                        
-                        # (Optional) Enrich the existing profile
-                        # e.g., Find profile in self.staging_profiles and fill missing values
+                        self.user_mapping[f"gym_{idx}"] = user_key   
                         
                     else:
-                        # --- NO MATCH: New User ---
+                        # NO MATCH: New User 
                         user_key = next_user_id
                         profile_hash_map[profile_hash] = user_key
                         next_user_id += 1
@@ -281,7 +286,7 @@ class FitnessNutritionETL:
                 except Exception as e:
                     logger.warning(f"Could not parse Gym Member row {idx}: {e}")
 
-        # --- Pass 3: Add Fitbit Users (Unlinkable) ---
+        # add fitbit users
         if 'fitbit' in self.data_sources:
             fitbit_users = set()
             for dataset in self.data_sources['fitbit'].values():
@@ -318,9 +323,7 @@ class FitnessNutritionETL:
         return 'maintain_health'
 
     def _create_staging_data(self):
-        """
-        Converts the processed staging_profiles list  into the final staging DataFrame
-        """
+        """Converts the processed staging_profiles list  into the final staging DataFrame"""
         logger.info("Creating staging data...")
         
         # create the user mapping
@@ -572,13 +575,22 @@ class FitnessNutritionETL:
             for _, row in df.iterrows():
                 user_key = self.user_mapping.get(f"fitbit_{row['Id']}")
                 date_key = self.date_lookup_rev.get(row['Date'])
+
+                try:
+                    bmi_val = float(row['BMI'])
+                    if not (10 < bmi_val < 60):
+                        logger.warning(f"Invalid BMI {bmi_val} for Fitbit ID {row['Id']}. Setting to NULL.")
+                        bmi_val = np.nan
+                except (ValueError, TypeError):
+                    bmi_val = np.nan
+
                 if user_key and date_key:
                     health_metrics.append({'UserKey': user_key, 'DateKey': date_key,
                                            'MetricTypeKey': self.metric_type_lookup['weight'],
                                            'Value': row['WeightKg'], 'Unit': 'kg'})
                     health_metrics.append({'UserKey': user_key, 'DateKey': date_key,
                                            'MetricTypeKey': self.metric_type_lookup['bmi'],
-                                           'Value': row['BMI'], 'Unit': 'bmi'})
+                                           'Value': bmi_val, 'Unit': 'bmi'})
 
         # Process daily activity as workout sessions
         if 'daily_activity' in fitbit_data:
@@ -587,13 +599,16 @@ class FitnessNutritionETL:
             for _, row in df.iterrows():
                 user_key = self.user_mapping.get(f"fitbit_{row['Id']}")
                 date_key = self.date_lookup_rev.get(row['ActivityDate'])
-                if user_key and date_key:
+
+                active_minutes = row['VeryActiveMinutes'] + row['FairlyActiveMinutes']
+
+                if user_key and date_key and active_minutes>0:
                     workout_sessions.append({
                         'UserKey': user_key, 'DateKey': date_key,
                         'WorkoutTypeKey': self.workout_type_lookup.get('mixed'), # Default
                         # store both hours and minutes for easier analytics --> calculate once for difference uses.
-                        'DurationHours': (row['VeryActiveMinutes'] + row['FairlyActiveMinutes']) / 60,
-                        'ActiveMinutes': row['VeryActiveMinutes'] + row['FairlyActiveMinutes'], 
+                        'DurationHours': active_minutes/60,
+                        'ActiveMinutes': active_minutes, 
                         'CaloriesBurned': row['Calories'],
                         'TotalSteps': row['TotalSteps'],
                         'TotalDistance': row['TotalDistance'],

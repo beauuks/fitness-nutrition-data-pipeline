@@ -10,7 +10,7 @@ SET @MIN_WEIGHT = 30;       -- kg
 SET @MAX_WEIGHT = 250;
 SET @MIN_BMI    = 10;
 SET @MAX_BMI    = 60;
-SET @MAX_WORKOUT_HOURS = 6;
+SET @MAX_WORKOUT_HOURS = 18;
 
 -- 1) Inventory & schema
 SELECT 'TABLE INVENTORY' AS section, table_name, table_rows

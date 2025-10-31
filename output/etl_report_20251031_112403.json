@@ -1,0 +1,36 @@
+{
+  "etl_timestamp": "2025-10-31T11:24:03.591840",
+  "data_sources_processed": [
+    "fitbit",
+    "gym_members",
+    "mendeley_health",
+    "nutrition"
+  ],
+  "total_users_mapped": 15597,
+  "total_records": 70226,
+  "table_counts": {
+    "Dim_User": 4698,
+    "Dim_Date": 3653,
+    "Dim_FoodItem": 8789,
+    "Dim_WorkoutType": 6,
+    "Dim_MealType": 4,
+    "Dim_MetricType": 4,
+    "Dim_HealthCondition": 2,
+    "Dim_FitnessGoal": 3,
+    "Dim_FitnessType": 6,
+    "Dim_Exercise": 4,
+    "Dim_Diet": 70,
+    "Fact_UserSnapshot": 4698,
+    "Fact_WorkoutSession": 233,
+    "Fact_HealthMetric": 676,
+    "Fact_NutritionLog": 155,
+    "Bridge_User_HealthCondition": 33,
+    "Bridge_User_WorkoutPreference": 969,
+    "Bridge_User_DietPreference": 46223
+  },
+  "validation": {
+    "quality_score": 100.0,
+    "issues": [],
+    "warnings": []
+  }
+}
