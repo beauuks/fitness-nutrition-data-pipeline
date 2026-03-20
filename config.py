@@ -53,3 +53,9 @@ QUALITY_THRESHOLDS = {
     'maximum_height': 2.5,  # meters
     'completeness_threshold': 0.7  # 70% data completeness required
 }
+
+# Unit Conversion Constants
+CONVERSION_FACTORS = {
+    'KJ_TO_KCAL': 0.239006,
+    'LBS_TO_KG': 0.453592
+}

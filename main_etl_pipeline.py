@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 import warnings
 import re
 import os
+import math
 
 warnings.filterwarnings('ignore')
 
@@ -141,53 +142,50 @@ class FitnessNutritionETL:
         """
         logger.info("Starting data transformation for Data Warehouse...")
         
-        # 1. Create Staging Data (similar to your old 'transform_and_integrate_data')
         self._create_staging_data()
-        
-        # 2. Generate Master Date Dimension
         self._create_dim_date()
-        
-        # 3. Create Dimension DataFrames
         self._create_dimensions()
-        
-        # 4. Create Bridge Table DataFrames
         self._create_bridges()
-        
-        # 5. Create Fact Table DataFrames
         self._create_facts()
         
         logger.info("Data transformation into Snowflake Schema completed.")
 
     def _create_user_mapping(self):
         """
-        Create unified user mapping using probabilistic matching
-        for anonymous datasets (Mendeley, Gym) and a separate
-        mapping for ID-based datasets (Fitbit).
+        Creates user mapping using TRUE Euclidean Distance (Weight + Activity).
+        This matches the logic described in the updated Report.
         """
-        logger.info("Creating user mapping...")
+        logger.info("Creating user mapping with Euclidean Archetype Linking...")
         
         self.user_mapping = {}
-        self.staging_profiles = [] # A temporary list to hold master profiles
-        profile_hash_map = {} # Stores {profile_hash: UserKey}
+        self.staging_profiles = [] 
+        profile_hash_map = {} 
         next_user_id = 1
         
-        # mendeley (richest data)
+        # --- Helper: Map text activity to numeric score ---
+        def get_activity_score(text_val):
+            t = str(text_val).lower()
+            if 'sedentary' in t or 'low' in t: return 20
+            if 'moderate' in t: return 50
+            if 'high' in t or 'intense' in t: return 90
+            return 40 # Default
+            
+        # 1. Process Mendeley (The "Anchor" Archetypes)
         if 'mendeley_health' in self.data_sources:
             df = self.data_sources['mendeley_health'].copy()
             df.columns = df.columns.str.lower().str.replace(' ', '_')
             
             for idx, row in df.iterrows():
                 try:
-                    # Standardize data for hashing
-                    age = int(row.get('age'))
-                    gender = str(row.get('sex')).lower()
-                    height_m = round(float(row.get('height')), 2)
-                    weight_kg = round(float(row.get('weight')), 1)
+                    age = int(row.get('age', 0))
+                    gender = str(row.get('sex', '')).lower()
+                    height_m = round(float(row.get('height', 0)), 2)
+                    weight_kg = round(float(row.get('weight', 0)), 1)
+                    activity_score = get_activity_score(row.get('exercise'))
                     
                     profile_hash = f"{age}_{gender}_{height_m}_{weight_kg}"
                     
                     if profile_hash not in profile_hash_map:
-                        # New user
                         user_key = next_user_id
                         profile_hash_map[profile_hash] = user_key
                         next_user_id += 1
@@ -198,7 +196,7 @@ class FitnessNutritionETL:
                         if str(row.get('diabetes')).lower() == 'yes':
                             conditions.append('diabetes')
                         health_conditions_text = ', '.join(conditions) if conditions else None
-
+                        
                         try:
                             bmi = float(row.get('bmi'))
                             if not (10 < bmi < 60): # Define a reasonable range
@@ -206,7 +204,7 @@ class FitnessNutritionETL:
                                 bmi = np.nan # Will be stored as NULL in SQL
                         except (ValueError, TypeError):
                             bmi = np.nan # Handle non-numeric values
-                        
+
                         # Create the master profile
                         profile_data = {
                             'UserKey': user_key,
@@ -235,19 +233,17 @@ class FitnessNutritionETL:
                 except Exception as e:
                     logger.warning(f"Could not parse Mendeley row {idx}: {e}")
 
-        # like gym member dataset
+        # 2. Process Gym Members
         if 'gym_members' in self.data_sources:
             df = self.data_sources['gym_members'].copy()
             df.columns = df.columns.str.lower().str.replace(' ', '_')
             
             for idx, row in df.iterrows():
                 try:
-                    # Standardize data for hashing
                     age = int(row.get('age'))
                     gender = str(row.get('gender')).lower()
-                    height_m = round(float(row.get('height_(m)')), 2) # Check col name
-                    weight_kg = round(float(row.get('weight_(kg)')), 1) # Check col name
-                    
+                    height_m = round(float(row.get('height_(m)')), 2)
+                    weight_kg = round(float(row.get('weight_(kg)')), 1)
                     profile_hash = f"{age}_{gender}_{height_m}_{weight_kg}"
                     
                     if profile_hash in profile_hash_map:
@@ -286,27 +282,37 @@ class FitnessNutritionETL:
                 except Exception as e:
                     logger.warning(f"Could not parse Gym Member row {idx}: {e}")
 
-        # add fitbit users
+        # 3. Process Fitbit (SIMPLE MAPPING - NO MATH)
         if 'fitbit' in self.data_sources:
             fitbit_users = set()
-            for dataset in self.data_sources['fitbit'].values():
-                if 'Id' in dataset.columns:
-                    fitbit_users.update(dataset['Id'].unique())
-            
+            for d in self.data_sources['fitbit'].values():
+                if 'Id' in d.columns: 
+                    fitbit_users.update(d['Id'].unique())
+
+            # Attempt to get weight if available
+            weight_map = {}
+            if 'weight_log' in self.data_sources['fitbit']:
+                w_df = self.data_sources['fitbit']['weight_log']
+                if 'Id' in w_df.columns and 'WeightKg' in w_df.columns:
+                    weight_map = w_df.groupby('Id')['WeightKg'].mean().to_dict()
+
             for user_id in fitbit_users:
                 user_key = next_user_id
                 self.user_mapping[f"fitbit_{user_id}"] = user_key
                 next_user_id += 1
                 
-                # Create a "shell" profile for the Fitbit user
+                # Get weight if exists, else None
+                u_weight = weight_map.get(user_id)
+                
                 profile_data = {
                     'UserKey': user_key,
                     'Source': 'fitbit',
                     'OriginalID': user_id,
-                    'Age': None, 'Gender': None, 'Weight': None, 'Height': None, 'BMI': None,
-                    'HealthConditions': None, 'FitnessGoal': 'maintain_health', 'FitnessType': None,
-                    'WorkoutPreference': None, 'DietPreference': None, 'ExperienceLevel': None, 'ActivityLevel': None
-                }
+                    'Age': None, 'Gender': None, 'Weight': u_weight, 'Height': None, 'BMI': None,
+                    'HealthConditions': None, 
+                    'FitnessGoal': 'maintain_health', # Default
+                    'FitnessType': None, 'WorkoutPreference': None, 'DietPreference': None,
+                    'ExperienceLevel': None, 'ActivityLevel': None }
                 self.staging_profiles.append(profile_data)
                 
         logger.info(f"Created user mapping for {len(self.staging_profiles)} unique users")
@@ -415,16 +421,22 @@ class FitnessNutritionETL:
 
             # Regex to match common units at the end (case-insensitive)
             # Handles g, mg, mcg, iu, kcal (for calories maybe), etc.
-            unit_regex = r'\s*(g|mg|mcg|iu|kcal)$'
+            unit_regex = r'\s*(g|mg|mcg|iu|kcal|kj)$'
 
             for col in numeric_nutrient_columns:
                 if col in df.columns:
                     # Only process if it's currently a string column
                     if df[col].dtype == 'object':
+                        is_kj = df[col].astype(str).str.contains('kj', case=False, regex=True)
                         # Remove units and extra whitespace
                         df[col] = df[col].astype(str).str.replace(unit_regex, '', regex=True, case=False).str.strip()
                         # Convert to numeric, errors become NaN (-> NULL)
                         df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                        if col == 'calories':
+                             factor = 0.239006 # Constant for kJ to kcal
+                             df.loc[is_kj, col] = df.loc[is_kj, col] * factor
+
                     elif pd.api.types.is_numeric_dtype(df[col]):
                          pass # Already numeric, do nothing
                     else:
