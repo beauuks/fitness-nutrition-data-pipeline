@@ -1,4 +1,4 @@
-# Smart Fitness & Nutrition Recommendation Pipeline
+# Fitness & Nutrition Data Pipeline
 
 ## Project Overview
 
